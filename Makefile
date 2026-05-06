@@ -2,8 +2,10 @@ APP        = TuneSync.app
 BIN        = .build/release/TuneSync
 PLIST      = $(APP)/Contents/Info.plist
 RES        = $(APP)/Contents/Resources
+DMG        = TuneSync-0.1.0.dmg
+DMG_STAGE  = .dmg-stage
 
-.PHONY: build bundle run clean
+.PHONY: build bundle sign dmg run clean
 
 build:
 	swift build -c release
@@ -34,8 +36,31 @@ bundle: build
 '</plist>' > $(PLIST)
 	@echo "Built $(APP)"
 
+sign: bundle
+	codesign --force --deep --sign - $(APP)
+	@echo "Ad-hoc signed (no developer ID — Gatekeeper will still warn on first open)"
+
+dmg: sign
+	rm -rf $(DMG_STAGE) $(DMG)
+	mkdir -p $(DMG_STAGE)
+	cp -R $(APP) $(DMG_STAGE)/
+	ln -s /Applications $(DMG_STAGE)/Applications
+	hdiutil create \
+		-volname "TuneSync" \
+		-srcfolder $(DMG_STAGE) \
+		-ov \
+		-format UDZO \
+		$(DMG)
+	rm -rf $(DMG_STAGE)
+	@echo ""
+	@echo "Built $(DMG) ($$(du -h $(DMG) | cut -f1))"
+	@echo ""
+	@echo "First-launch note: macOS will say 'cannot be opened because the developer"
+	@echo "cannot be verified.' Right-click the app -> Open -> Open. Required only once."
+	@echo "Or run:  xattr -dr com.apple.quarantine /Applications/TuneSync.app"
+
 run: bundle
 	open $(APP)
 
 clean:
-	rm -rf $(APP) .build
+	rm -rf $(APP) .build $(DMG) $(DMG_STAGE)
