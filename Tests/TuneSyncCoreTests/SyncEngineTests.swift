@@ -113,4 +113,90 @@ final class SyncEngineTests: XCTestCase {
         e.heartbeatTickForTesting()
         XCTAssertEqual(r.broadcasts.count, 2)
     }
+
+    func testOutboundStateStampsClientMs() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let before = Int64(Date().timeIntervalSince1970 * 1000)
+        e.localStateChanged(PlayerState(videoId: "v", t: 1, playing: true))
+        e.flushDebounceForTesting()
+        let after = Int64(Date().timeIntervalSince1970 * 1000)
+        XCTAssertEqual(r.broadcasts.count, 1)
+        guard case .state(let s) = r.broadcasts[0] else {
+            return XCTFail("expected state")
+        }
+        XCTAssertNotNil(s.clientMs)
+        XCTAssertGreaterThanOrEqual(s.clientMs!, before)
+        XCTAssertLessThanOrEqual(s.clientMs!, after)
+    }
+
+    func testLatencyCompensationAdvancesPlayingT() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "vid", t: 10.0, playing: true,
+            clientMs: nowMs - 500   // peer sent 500 ms ago
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        // Should have advanced t by ~0.5s
+        XCTAssertEqual(r.applies[0].t, 10.5, accuracy: 0.15)
+    }
+
+    func testLatencyCompensationSkippedForPause() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "vid", t: 10.0, playing: false,
+            clientMs: nowMs - 500
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        // Pause: position is the literal pause point, no comp
+        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+    }
+
+    func testLatencyCompensationCappedAtTwoSeconds() {
+        // Defends against badly skewed Mac clocks: never advance more than ~2s.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "vid", t: 10.0, playing: true,
+            clientMs: nowMs - 60_000   // peer's clock claims 60s in the past
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        // No compensation applied → t is the raw value
+        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+    }
+
+    func testLatencyCompensationSkippedForNegativeElapsed() {
+        // Peer's clock is ahead of ours; we should NOT subtract.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "vid", t: 10.0, playing: true,
+            clientMs: nowMs + 5_000    // peer's clock 5s in the future
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+    }
+
+    func testMissingClientMsBackwardsCompat() {
+        // Older clients won't send clientMs — must still apply.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "vid", t: 10.0, playing: true,
+            clientMs: nil
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+    }
 }

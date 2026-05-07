@@ -25,7 +25,7 @@ public final class SyncEngine: @unchecked Sendable {
         applyState: @escaping (PlayerState) -> Void,
         debounceMs: Int = 200,
         suppressionMs: Int = 500,
-        heartbeatSeconds: Int = 5
+        heartbeatSeconds: Int = 3
     ) {
         self.senderId = senderId
         self.broadcast = broadcast
@@ -76,7 +76,20 @@ public final class SyncEngine: @unchecked Sendable {
             if !LamportClock.strictlyNewer(key, than: lastApplied) { return }
             lastApplied = key
             suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
-            applyStateImpl(PlayerState(videoId: s.videoId, t: s.t, playing: s.playing))
+
+            // Latency compensation: if peer is playing, advance `t` by however
+            // long the message took to reach us. Capped at 2s to avoid being
+            // misled by skewed Mac clocks (NTP keeps Macs within ~50ms normally).
+            var effectiveT = s.t
+            if s.playing, let cms = s.clientMs {
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                let elapsedMs = nowMs - cms
+                if elapsedMs > 0 && elapsedMs < 2000 {
+                    effectiveT += Double(elapsedMs) / 1000.0
+                }
+            }
+
+            applyStateImpl(PlayerState(videoId: s.videoId, t: effectiveT, playing: s.playing))
         case .hello, .bye:
             break
         }
@@ -87,23 +100,23 @@ public final class SyncEngine: @unchecked Sendable {
         pendingLocalState = nil
         if Date() < suppressUntil { return }
         if adShowing { return }
-        let ts = clock.tick()
-        let msg = SyncMessage.state(StateMessage(
-            senderId: senderId, ts: ts,
-            videoId: s.videoId, t: s.t, playing: s.playing
-        ))
-        broadcast(msg)
+        broadcast(buildStateMessage(s))
     }
 
     private func heartbeatTick() {
         guard let s = lastLocalState else { return }
         if adShowing { return }
+        broadcast(buildStateMessage(s))
+    }
+
+    private func buildStateMessage(_ s: PlayerState) -> SyncMessage {
         let ts = clock.tick()
-        let msg = SyncMessage.state(StateMessage(
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        return SyncMessage.state(StateMessage(
             senderId: senderId, ts: ts,
-            videoId: s.videoId, t: s.t, playing: s.playing
+            videoId: s.videoId, t: s.t, playing: s.playing,
+            clientMs: nowMs
         ))
-        broadcast(msg)
     }
 
     public func flushDebounceForTesting() {

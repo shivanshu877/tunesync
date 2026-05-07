@@ -22,13 +22,21 @@ public struct StateMessage: Codable, Equatable, Sendable {
     public let videoId: String
     public let t: Double
     public let playing: Bool
+    /// Sender's wall-clock (ms since epoch) when the message was encoded.
+    /// Used by the receiver to compensate for network latency: the receiver
+    /// advances `t` by (localNow - clientMs) when applying play-state, so
+    /// peers stay aligned to "where the song actually is now," not where it
+    /// was when the message left the sender. Optional for backwards-compat
+    /// with older clients that didn't include it.
+    public let clientMs: Int64?
 
-    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool) {
+    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool, clientMs: Int64? = nil) {
         self.senderId = senderId
         self.ts = ts
         self.videoId = videoId
         self.t = t
         self.playing = playing
+        self.clientMs = clientMs
     }
 }
 

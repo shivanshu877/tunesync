@@ -79,7 +79,7 @@ enum InjectedJS {
       window.location.href = dest;
       return true;
     }
-    if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 1.5) {
+    if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 0.6) {
       try { v.currentTime = t; } catch (e) {}
     }
     if (playing && v.paused) { v.play().catch(function () {}); }
