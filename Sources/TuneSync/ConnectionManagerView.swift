@@ -18,12 +18,13 @@ public struct ConnectionManagerView: View {
                     roomSection
                     connectedSection
                     discoveredSection
+                    diagnosticsSection
                     Spacer(minLength: 0)
                 }
                 .padding(16)
             }
         }
-        .frame(width: 280)
+        .frame(width: 320)
         .background(Color(NSColor.windowBackgroundColor))
         .onAppear { roomDraft = rt.currentRoom }
     }
@@ -120,6 +121,112 @@ public struct ConnectionManagerView: View {
                 }
             }
         }
+    }
+
+    private var diagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("DIAGNOSTICS")
+
+            // My current state
+            VStack(alignment: .leading, spacing: 4) {
+                Text("This Mac (\(String(rt.senderId.prefix(8))))")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                if let s = rt.lastLocalState {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(s.playing ? Color.green : Color.gray)
+                            .frame(width: 6, height: 6)
+                        Text("\(s.videoId.prefix(11)) @ \(formatT(s.t))")
+                            .font(.system(size: 11, design: .monospaced))
+                    }
+                } else {
+                    Text("No state yet — waiting for YT Music")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+                if let d = rt.lastDiag {
+                    if let why = d.skipped {
+                        Text("JS skipped last report: \(why)")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                    }
+                    if d.ad == true {
+                        Text("Ad detected — outbound suppressed")
+                            .font(.system(size: 10))
+                            .foregroundColor(.orange)
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.04))
+            .cornerRadius(6)
+
+            // Last 8 sync events
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Recent sync events")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                if rt.syncHistory.isEmpty {
+                    Text("No events yet.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(Array(rt.syncHistory.suffix(8).enumerated().reversed()), id: \.offset) { _, e in
+                        historyRow(e)
+                    }
+                }
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.black.opacity(0.04))
+            .cornerRadius(6)
+        }
+    }
+
+    private func historyRow(_ e: SyncEntry) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            Text(e.direction.rawValue.uppercased())
+                .font(.system(size: 9, weight: .bold, design: .monospaced))
+                .foregroundColor(directionColor(e.direction))
+                .frame(width: 50, alignment: .leading)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("\(e.videoId.prefix(11)) @ \(formatT(e.t)) \(e.playing ? "▶" : "⏸")")
+                    .font(.system(size: 10, design: .monospaced))
+                if let n = e.note {
+                    Text(n)
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+            Text(formatAge(e.at))
+                .font(.system(size: 9, design: .monospaced))
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private func directionColor(_ d: SyncEntry.Direction) -> Color {
+        switch d {
+        case .sent: return .blue
+        case .recv: return .purple
+        case .applied: return .green
+        case .skipped: return .orange
+        }
+    }
+
+    private func formatT(_ t: Double) -> String {
+        let m = Int(t) / 60
+        let s = Int(t) % 60
+        return String(format: "%d:%02d", m, s)
+    }
+
+    private func formatAge(_ d: Date) -> String {
+        let dt = Date().timeIntervalSince(d)
+        if dt < 1 { return "now" }
+        if dt < 60 { return "\(Int(dt))s" }
+        return "\(Int(dt / 60))m"
     }
 
     private func sectionLabel(_ title: String) -> some View {

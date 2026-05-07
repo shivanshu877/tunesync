@@ -2,11 +2,23 @@ import Foundation
 import WebKit
 import TuneSyncCore
 
+public struct DiagSnapshot: Equatable, Sendable {
+    public let videoId: String?
+    public let t: Double?
+    public let playing: Bool?
+    public let ad: Bool?
+    public let skipped: String?
+    public let at: Date
+
+    public var isLive: Bool { videoId != nil && skipped == nil }
+}
+
 @MainActor
 public final class PlayerController: NSObject {
 
     public var onLocalState: ((PlayerState) -> Void)?
     public var onAdStateChanged: ((Bool) -> Void)?
+    public var onDiag: ((DiagSnapshot) -> Void)?
 
     private weak var webView: WKWebView?
     private var lastAd: Bool = false
@@ -21,7 +33,22 @@ public final class PlayerController: NSObject {
 
     public func handleMessage(_ payload: Any) {
         guard let dict = payload as? [String: Any] else { return }
-        guard (dict["kind"] as? String) == "state" else { return }
+        let kind = (dict["kind"] as? String) ?? ""
+
+        if kind == "diag" {
+            let diag = DiagSnapshot(
+                videoId: dict["videoId"] as? String,
+                t: dict["t"] as? Double,
+                playing: dict["playing"] as? Bool,
+                ad: dict["ad"] as? Bool,
+                skipped: dict["skipped"] as? String,
+                at: Date()
+            )
+            onDiag?(diag)
+            return
+        }
+
+        guard kind == "state" else { return }
         guard let videoId = dict["videoId"] as? String else { return }
         let t = (dict["t"] as? Double) ?? 0
         let playing = (dict["playing"] as? Bool) ?? false

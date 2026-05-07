@@ -27,28 +27,55 @@ enum InjectedJS {
   }
 
   function getVideoId() {
+    // 1. URL search param (most reliable when on /watch)
+    try {
+      var url = new URL(window.location.href);
+      var v = url.searchParams.get("v");
+      if (v) return v;
+    } catch (e) {}
+
+    // 2. Internal player API (may be present on ytmusic-player-bar)
     var el = document.querySelector("ytmusic-player-bar");
-    if (el && el.playerApi_ && typeof el.playerApi_.getVideoData === "function") {
-      try {
-        var data = el.playerApi_.getVideoData();
-        if (data && data.video_id) return data.video_id;
-      } catch (e) {}
+    if (el) {
+      var api = el.playerApi_ || el.playerApi;
+      if (api && typeof api.getVideoData === "function") {
+        try {
+          var data = api.getVideoData();
+          if (data && data.video_id) return data.video_id;
+        } catch (e) {}
+      }
     }
-    var link = document.querySelector(".content-info-wrapper a[href*='watch?v=']");
+
+    // 3. Now-playing card link in the player bar
+    var sel = [
+      ".content-info-wrapper a[href*='watch?v=']",
+      "ytmusic-player-bar a[href*='watch?v=']",
+      ".now-playing-info a[href*='watch?v=']",
+      "a.ytp-title-link[href*='watch?v=']",
+    ].join(", ");
+    var link = document.querySelector(sel);
     if (link) {
       var m = link.href.match(/[?&]v=([^&]+)/);
       if (m) return m[1];
     }
-    var url = new URL(window.location.href);
-    var v = url.searchParams.get("v");
-    return v || null;
+
+    // 4. The HTML5 <video> element's src (often blob:, but if not, may carry the id)
+    var v2 = document.querySelector("video");
+    if (v2 && v2.src) {
+      var m2 = v2.src.match(/[?&]v=([^&]+)/);
+      if (m2) return m2[1];
+    }
+
+    return null;
   }
 
   function isAdShowing() {
+    // Narrow signal: only the player bar's own "ad-showing" class. The earlier
+    // fallback (querySelector(".ad-showing, .ytp-ad-player-overlay")) matched
+    // hidden ad-related elements that exist even when no ad is actually
+    // playing, which permanently suppressed outbound state.
     var bar = document.querySelector("ytmusic-player-bar");
-    if (bar && bar.classList.contains("ad-showing")) return true;
-    var ad = document.querySelector(".ad-showing, .ytp-ad-player-overlay");
-    return !!ad;
+    return !!(bar && bar.classList.contains("ad-showing"));
   }
 
   function snapshot() {
@@ -67,10 +94,25 @@ enum InjectedJS {
   }
 
   function reportState() {
-    // Echo-loop guard: if we just applied remote state, suppress.
-    if (Date.now() - lastAppliedAt < COOLDOWN_MS) return;
+    var why = null;
     var s = snapshot();
-    if (!s || !s.videoId) return;
+    if (Date.now() - lastAppliedAt < COOLDOWN_MS) why = "cooldown";
+    else if (!s) why = "no-video";
+    else if (!s.videoId) why = "no-video-id";
+
+    // Always emit a diagnostic ping so the native side knows we're alive
+    // and can show what was/wasn't broadcast.
+    post({
+      kind: "diag",
+      videoId: s ? s.videoId : null,
+      t: s ? s.t : null,
+      playing: s ? s.playing : null,
+      ad: s ? s.ad : null,
+      skipped: why,
+      at: Date.now(),
+    });
+
+    if (why) return;
     post({ kind: "state", videoId: s.videoId, t: s.t, playing: s.playing, ad: s.ad });
   }
 

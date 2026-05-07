@@ -9,7 +9,12 @@ public final class AppRuntime: ObservableObject {
     @Published public var lastWriter: String?
     @Published public var adShowing: Bool = false
 
+    @Published public var lastDiag: DiagSnapshot?
+    @Published public var lastLocalState: PlayerState?
+    @Published public var syncHistory: [SyncEntry] = []
+
     public var peerCount: Int { connectedPeers.count }
+    public var senderId: String { engine.senderId }
 
     public let player = PlayerController()
     public let engine: SyncEngine
@@ -37,11 +42,20 @@ public final class AppRuntime: ObservableObject {
         }
 
         self.player.onLocalState = { [weak self] state in
+            DispatchQueue.main.async { self?.lastLocalState = state }
             self?.engine.localStateChanged(state)
         }
         self.player.onAdStateChanged = { [weak self] ad in
             DispatchQueue.main.async { self?.adShowing = ad }
             self?.engine.adShowing = ad
+        }
+        self.player.onDiag = { [weak self] diag in
+            DispatchQueue.main.async { self?.lastDiag = diag }
+        }
+        self.engine.onHistoryChanged = { [weak self] in
+            guard let self else { return }
+            let snap = self.engine.history
+            DispatchQueue.main.async { self.syncHistory = snap }
         }
 
         let bridge = MeshBridge(owner: self)
