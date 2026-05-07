@@ -6,6 +6,14 @@ enum InjectedJS {
   if (window.__TUNESYNC_INSTALLED__) return;
   window.__TUNESYNC_INSTALLED__ = true;
 
+  // Cooldown to break echo loops: when tunesyncApplyState changes the
+  // player, the resulting `seeked` / `play` / `pause` events would
+  // otherwise feed back into reportState and broadcast — peers would
+  // bounce state back and forth. We mute reportState for COOLDOWN_MS
+  // after any apply that actually changed something.
+  var COOLDOWN_MS = 1500;
+  var lastAppliedAt = 0;
+
   function post(payload) {
     try {
       window.webkit.messageHandlers.tunesync.postMessage(payload);
@@ -49,12 +57,18 @@ enum InjectedJS {
     return {
       videoId: getVideoId(),
       t: v.currentTime || 0,
-      playing: !v.paused && !v.ended && v.readyState > 2,
+      // NOTE: deliberately not gated on readyState — during a seek the
+      // video element briefly drops to a lower readyState, which used to
+      // make us report "playing: false" mid-seek and pull peers into a
+      // pause/play flap. The simpler check is correct.
+      playing: !v.paused && !v.ended,
       ad: isAdShowing(),
     };
   }
 
   function reportState() {
+    // Echo-loop guard: if we just applied remote state, suppress.
+    if (Date.now() - lastAppliedAt < COOLDOWN_MS) return;
     var s = snapshot();
     if (!s || !s.videoId) return;
     post({ kind: "state", videoId: s.videoId, t: s.t, playing: s.playing, ad: s.ad });
@@ -74,16 +88,24 @@ enum InjectedJS {
     var v = getVideo();
     if (!v) return false;
     var current = getVideoId();
+    var changed = false;
+
     if (videoId && videoId !== current) {
       var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
+      lastAppliedAt = Date.now();
       window.location.href = dest;
       return true;
     }
-    if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 0.6) {
-      try { v.currentTime = t; } catch (e) {}
+
+    if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 1.0) {
+      try { v.currentTime = t; changed = true; } catch (e) {}
     }
-    if (playing && v.paused) { v.play().catch(function () {}); }
-    if (!playing && !v.paused) { v.pause(); }
+    if (playing && v.paused) { v.play().catch(function () {}); changed = true; }
+    if (!playing && !v.paused) { v.pause(); changed = true; }
+
+    if (changed) {
+      lastAppliedAt = Date.now();
+    }
     return true;
   };
 
@@ -92,6 +114,9 @@ enum InjectedJS {
   setInterval(hookVideo, 1000);
   hookVideo();
 
+  // Periodic catch-up: if no event-driven state has fired (e.g., user is
+  // letting a song play untouched), this gets the latest playhead out
+  // every 5s. The cooldown guard inside reportState() still applies.
   setInterval(reportState, 5000);
 
   console.info("[tunesync] injected");

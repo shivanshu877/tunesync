@@ -158,8 +158,8 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
     }
 
-    func testLatencyCompensationCappedAtTwoSeconds() {
-        // Defends against badly skewed Mac clocks: never advance more than ~2s.
+    func testLatencyCompensationCappedAt800ms() {
+        // Defends against badly skewed Mac clocks: don't advance more than ~800ms.
         let r = Recorder()
         let e = makeEngine(recorder: r)
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -169,8 +169,20 @@ final class SyncEngineTests: XCTestCase {
             clientMs: nowMs - 60_000   // peer's clock claims 60s in the past
         )))
         XCTAssertEqual(r.applies.count, 1)
-        // No compensation applied → t is the raw value
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+    }
+
+    func testLatencyCompensationAppliesUnder800ms() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "vid", t: 10.0, playing: true,
+            clientMs: nowMs - 700   // 700ms — under cap, should comp
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertEqual(r.applies[0].t, 10.7, accuracy: 0.15)
     }
 
     func testLatencyCompensationSkippedForNegativeElapsed() {

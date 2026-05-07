@@ -24,7 +24,7 @@ public final class SyncEngine: @unchecked Sendable {
         broadcast: @escaping (SyncMessage) -> Void,
         applyState: @escaping (PlayerState) -> Void,
         debounceMs: Int = 200,
-        suppressionMs: Int = 500,
+        suppressionMs: Int = 1500,
         heartbeatSeconds: Int = 3
     ) {
         self.senderId = senderId
@@ -78,13 +78,15 @@ public final class SyncEngine: @unchecked Sendable {
             suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
 
             // Latency compensation: if peer is playing, advance `t` by however
-            // long the message took to reach us. Capped at 2s to avoid being
-            // misled by skewed Mac clocks (NTP keeps Macs within ~50ms normally).
+            // long the message took to reach us. Capped at 800ms — typical LAN
+            // RTT is <20ms; anything beyond ~800ms is more likely to be Mac
+            // clock skew than real network delay, and over-compensating would
+            // make peers seek wildly forward.
             var effectiveT = s.t
             if s.playing, let cms = s.clientMs {
                 let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
                 let elapsedMs = nowMs - cms
-                if elapsedMs > 0 && elapsedMs < 2000 {
+                if elapsedMs > 0 && elapsedMs < 800 {
                     effectiveT += Double(elapsedMs) / 1000.0
                 }
             }
