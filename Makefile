@@ -2,7 +2,7 @@ APP        = TuneSync.app
 BIN        = .build/release/TuneSync
 PLIST      = $(APP)/Contents/Info.plist
 RES        = $(APP)/Contents/Resources
-DMG        = TuneSync-0.1.0.dmg
+DMG        = TuneSync-0.2.0.dmg
 DMG_STAGE  = .dmg-stage
 
 .PHONY: build bundle sign dmg run clean
@@ -24,8 +24,8 @@ bundle: build
 '<key>CFBundleName</key><string>TuneSync</string>' \
 '<key>CFBundleDisplayName</key><string>TuneSync</string>' \
 '<key>CFBundleIdentifier</key><string>com.tunesync.app</string>' \
-'<key>CFBundleVersion</key><string>0.1.0</string>' \
-'<key>CFBundleShortVersionString</key><string>0.1.0</string>' \
+'<key>CFBundleVersion</key><string>0.2.0</string>' \
+'<key>CFBundleShortVersionString</key><string>0.2.0</string>' \
 '<key>CFBundleExecutable</key><string>TuneSync</string>' \
 '<key>CFBundlePackageType</key><string>APPL</string>' \
 '<key>LSMinimumSystemVersion</key><string>14.0</string>' \
