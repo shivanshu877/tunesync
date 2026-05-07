@@ -1,9 +1,21 @@
 import Foundation
 import Network
 
+public struct ConnectedPeer: Equatable, Sendable {
+    public let senderId: String
+    public let displayName: String
+    public let connectedAt: Date
+}
+
+public struct DiscoveredPeer: Equatable, Sendable {
+    public let senderId: String
+    public let displayName: String
+    public let room: String
+}
+
 public protocol PeerMeshDelegate: AnyObject {
     func peerMesh(_ mesh: PeerMesh, received message: SyncMessage, from peerId: String)
-    func peerMesh(_ mesh: PeerMesh, peerCountChanged count: Int)
+    func peerMesh(_ mesh: PeerMesh, peersChanged connected: [ConnectedPeer], discovered: [DiscoveredPeer], room: String)
 }
 
 public final class PeerMesh: @unchecked Sendable {
@@ -12,7 +24,15 @@ public final class PeerMesh: @unchecked Sendable {
         let id: String
         var displayName: String
         let connection: NWConnection
+        let connectedAt: Date
         var parser = FrameParser()
+    }
+
+    private struct Discovered: Equatable {
+        let senderId: String
+        let displayName: String
+        let room: String
+        let endpoint: NWEndpoint
     }
 
     public weak var delegate: PeerMeshDelegate?
@@ -29,14 +49,20 @@ public final class PeerMesh: @unchecked Sendable {
     private var peers: [String: PeerConn] = [:]
     private var pendingByEndpoint: [NWEndpoint: NWConnection] = [:]
     private var pendingParsers: [NWEndpoint: FrameParser] = [:]
+    private var discovered: [String: Discovered] = [:]
+    private var kicked: Set<String> = []
+
+    private var room: String
 
     public init(
         senderId: String,
         displayName: String,
+        room: String = "default",
         serviceType: String = "_tunesync._tcp"
     ) {
         self.senderId = senderId
         self.displayName = displayName
+        self.room = room
         self.serviceType = serviceType
     }
 
@@ -53,6 +79,7 @@ public final class PeerMesh: @unchecked Sendable {
         for (_, c) in pendingByEndpoint { c.cancel() }
         pendingByEndpoint.removeAll()
         pendingParsers.removeAll()
+        discovered.removeAll()
     }
 
     public func broadcast(_ message: SyncMessage) {
@@ -67,6 +94,56 @@ public final class PeerMesh: @unchecked Sendable {
 
     public var peerCount: Int { peers.count }
 
+    public var currentRoom: String {
+        get { queue.sync { room } }
+    }
+
+    public func setRoom(_ name: String) {
+        queue.async { [self] in
+            let trimmed = name.trimmingCharacters(in: .whitespaces)
+            let next = trimmed.isEmpty ? "default" : trimmed
+            if next == room { return }
+            room = next
+            // Drop all peers + restart with new room
+            for (_, p) in peers { p.connection.cancel() }
+            peers.removeAll()
+            for (_, c) in pendingByEndpoint { c.cancel() }
+            pendingByEndpoint.removeAll()
+            pendingParsers.removeAll()
+            discovered.removeAll()
+            kicked.removeAll()
+            listener?.cancel()
+            browser?.cancel()
+            startListener()
+            startBrowser()
+            notifyChange()
+        }
+    }
+
+    public func kick(senderId: String) {
+        queue.async { [self] in
+            guard let pc = peers[senderId] else { return }
+            kicked.insert(senderId)
+            pc.connection.cancel()
+            peers.removeValue(forKey: senderId)
+            Log.mesh.info("kicked peer: \(senderId, privacy: .public)")
+            notifyChange()
+        }
+    }
+
+    public func reconnect(senderId: String) {
+        queue.async { [self] in
+            kicked.remove(senderId)
+            guard let d = discovered[senderId] else { return }
+            if peers[senderId] != nil { return }
+            if pendingByEndpoint[d.endpoint] != nil { return }
+            let conn = NWConnection(to: d.endpoint, using: .tcp)
+            pendingByEndpoint[d.endpoint] = conn
+            pendingParsers[d.endpoint] = FrameParser()
+            configureConnection(conn, side: .outgoing)
+        }
+    }
+
     private func startListener() {
         do {
             let params = NWParameters.tcp
@@ -75,6 +152,7 @@ public final class PeerMesh: @unchecked Sendable {
             let txt = NWTXTRecord([
                 "id": senderId,
                 "name": displayName,
+                "room": room,
             ])
             listener.service = NWListener.Service(
                 name: "TuneSync-\(senderId.prefix(8))",
@@ -120,26 +198,33 @@ public final class PeerMesh: @unchecked Sendable {
     }
 
     private func handleBrowse(_ results: Set<NWBrowser.Result>) {
+        var newDiscovered: [String: Discovered] = [:]
+
         for result in results {
-            if case .bonjour(let txt) = result.metadata,
-               txt.dictionary["id"] == senderId {
-                continue
-            }
+            guard case .bonjour(let txt) = result.metadata,
+                  let id = txt.dictionary["id"],
+                  id != senderId else { continue }
+            let name = txt.dictionary["name"] ?? "Mac"
+            let resultRoom = txt.dictionary["room"] ?? "default"
+            if resultRoom != room { continue }
+
+            newDiscovered[id] = Discovered(senderId: id, displayName: name, room: resultRoom, endpoint: result.endpoint)
+
+            // Auto-connect unless kicked or already pending/connected
+            if peers[id] != nil { continue }
+            if kicked.contains(id) { continue }
             if pendingByEndpoint[result.endpoint] != nil { continue }
-            if peersAlreadyConnected(to: result) { continue }
 
             let conn = NWConnection(to: result.endpoint, using: .tcp)
             pendingByEndpoint[result.endpoint] = conn
             pendingParsers[result.endpoint] = FrameParser()
             configureConnection(conn, side: .outgoing)
         }
-    }
 
-    private func peersAlreadyConnected(to result: NWBrowser.Result) -> Bool {
-        guard case .bonjour(let txt) = result.metadata, let id = txt.dictionary["id"] else {
-            return false
+        if newDiscovered != discovered {
+            discovered = newDiscovered
+            notifyChange()
         }
-        return peers[id] != nil
     }
 
     private enum Side { case incoming, outgoing }
@@ -211,14 +296,23 @@ public final class PeerMesh: @unchecked Sendable {
             switch msg {
             case .hello(let h):
                 if peers[h.senderId] == nil, h.senderId != senderId {
-                    let activeParser = peers[h.senderId]?.parser ?? parser
-                    let pc = PeerConn(id: h.senderId, displayName: h.displayName, connection: conn, parser: activeParser)
+                    if kicked.contains(h.senderId) {
+                        conn.cancel()
+                        continue
+                    }
+                    let pc = PeerConn(
+                        id: h.senderId,
+                        displayName: h.displayName,
+                        connection: conn,
+                        connectedAt: Date(),
+                        parser: parser
+                    )
                     peers[h.senderId] = pc
                     pendingByEndpoint.removeValue(forKey: endpoint)
                     pendingParsers.removeValue(forKey: endpoint)
                     Log.mesh.info("peer connected: \(h.senderId, privacy: .public) (\(h.displayName, privacy: .public))")
-                    delegate?.peerMesh(self, peerCountChanged: peers.count)
                     sendHello(on: conn)
+                    notifyChange()
                 }
             case .state, .bye:
                 if let id = existingPeerId ?? peerId(forEndpoint: endpoint) {
@@ -253,7 +347,22 @@ public final class PeerMesh: @unchecked Sendable {
 
     private func removePeer(id: String) {
         peers.removeValue(forKey: id)
-        delegate?.peerMesh(self, peerCountChanged: peers.count)
         Log.mesh.info("peer removed: \(id, privacy: .public)")
+        notifyChange()
+    }
+
+    private func notifyChange() {
+        let connected: [ConnectedPeer] = peers.values
+            .map { ConnectedPeer(senderId: $0.id, displayName: $0.displayName, connectedAt: $0.connectedAt) }
+            .sorted { $0.connectedAt < $1.connectedAt }
+
+        let connectedIds = Set(connected.map { $0.senderId })
+        let disc: [DiscoveredPeer] = discovered.values
+            .filter { !connectedIds.contains($0.senderId) }
+            .map { DiscoveredPeer(senderId: $0.senderId, displayName: $0.displayName, room: $0.room) }
+            .sorted { $0.displayName < $1.displayName }
+
+        let snap = (connected, disc, room)
+        delegate?.peerMesh(self, peersChanged: snap.0, discovered: snap.1, room: snap.2)
     }
 }

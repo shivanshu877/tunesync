@@ -4,11 +4,13 @@ public struct StatusBar: View {
     @Binding public var peerCount: Int
     @Binding public var lastWriter: String?
     @Binding public var adShowing: Bool
+    @Binding public var room: String
 
-    public init(peerCount: Binding<Int>, lastWriter: Binding<String?>, adShowing: Binding<Bool>) {
+    public init(peerCount: Binding<Int>, lastWriter: Binding<String?>, adShowing: Binding<Bool>, room: Binding<String>) {
         self._peerCount = peerCount
         self._lastWriter = lastWriter
         self._adShowing = adShowing
+        self._room = room
     }
 
     public var body: some View {
@@ -31,7 +33,7 @@ public struct StatusBar: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundColor(.orange)
             }
-            Text("room: default")
+            Text("room: \(room)")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
         }

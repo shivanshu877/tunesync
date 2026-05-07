@@ -3,9 +3,13 @@ import TuneSyncCore
 
 @MainActor
 public final class AppRuntime: ObservableObject {
-    @Published public var peerCount: Int = 0
+    @Published public var connectedPeers: [ConnectedPeer] = []
+    @Published public var discoveredPeers: [DiscoveredPeer] = []
+    @Published public var currentRoom: String = "default"
     @Published public var lastWriter: String?
     @Published public var adShowing: Bool = false
+
+    public var peerCount: Int { connectedPeers.count }
 
     public let player = PlayerController()
     public let engine: SyncEngine
@@ -17,7 +21,7 @@ public final class AppRuntime: ObservableObject {
         let id = UUID().uuidString
         let name = Host.current().localizedName ?? "Mac"
 
-        let mesh = PeerMesh(senderId: id, displayName: name)
+        let mesh = PeerMesh(senderId: id, displayName: name, room: "default")
         let engine = SyncEngine(
             senderId: id,
             broadcast: { [weak mesh] msg in mesh?.broadcast(msg) },
@@ -54,6 +58,18 @@ public final class AppRuntime: ObservableObject {
         mesh.stop()
     }
 
+    public func changeRoom(_ name: String) {
+        mesh.setRoom(name)
+    }
+
+    public func kickPeer(_ senderId: String) {
+        mesh.kick(senderId: senderId)
+    }
+
+    public func reconnectPeer(_ senderId: String) {
+        mesh.reconnect(senderId: senderId)
+    }
+
     fileprivate func received(_ message: SyncMessage, from peerId: String) {
         if case .state(let s) = message {
             DispatchQueue.main.async { self.lastWriter = String(s.senderId.prefix(8)) }
@@ -61,8 +77,12 @@ public final class AppRuntime: ObservableObject {
         engine.handleRemote(message)
     }
 
-    fileprivate func peersChanged(_ count: Int) {
-        DispatchQueue.main.async { self.peerCount = count }
+    fileprivate func peersChanged(_ connected: [ConnectedPeer], _ discovered: [DiscoveredPeer], room: String) {
+        DispatchQueue.main.async {
+            self.connectedPeers = connected
+            self.discoveredPeers = discovered
+            self.currentRoom = room
+        }
     }
 }
 
@@ -74,26 +94,45 @@ final class MeshBridge: PeerMeshDelegate, @unchecked Sendable {
         let ownerRef = owner
         Task { @MainActor in ownerRef?.received(message, from: peerId) }
     }
-    func peerMesh(_ mesh: PeerMesh, peerCountChanged count: Int) {
+
+    func peerMesh(_ mesh: PeerMesh, peersChanged connected: [ConnectedPeer], discovered: [DiscoveredPeer], room: String) {
         let ownerRef = owner
-        Task { @MainActor in ownerRef?.peersChanged(count) }
+        Task { @MainActor in ownerRef?.peersChanged(connected, discovered, room: room) }
     }
 }
 
 public struct ContentView: View {
     @StateObject private var rt = AppRuntime()
+    @State private var showSidebar: Bool = false
 
     public init() {}
 
     public var body: some View {
-        VStack(spacing: 0) {
-            WebViewHost(player: rt.player)
-                .frame(minWidth: 800, minHeight: 600)
-            StatusBar(
-                peerCount: .init(get: { rt.peerCount }, set: { _ in }),
-                lastWriter: .init(get: { rt.lastWriter }, set: { _ in }),
-                adShowing: .init(get: { rt.adShowing }, set: { _ in })
-            )
+        HStack(spacing: 0) {
+            VStack(spacing: 0) {
+                WebViewHost(player: rt.player)
+                    .frame(minWidth: 800, minHeight: 600)
+                StatusBar(
+                    peerCount: .init(get: { rt.peerCount }, set: { _ in }),
+                    lastWriter: .init(get: { rt.lastWriter }, set: { _ in }),
+                    adShowing: .init(get: { rt.adShowing }, set: { _ in }),
+                    room: .init(get: { rt.currentRoom }, set: { _ in })
+                )
+            }
+            if showSidebar {
+                Divider()
+                ConnectionManagerView(rt: rt)
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showSidebar.toggle() } }) {
+                    Label(showSidebar ? "Hide Peers" : "Show Peers",
+                          systemImage: showSidebar ? "sidebar.right" : "person.2")
+                }
+                .help(showSidebar ? "Hide Connection Manager" : "Show Connection Manager")
+            }
         }
         .onAppear { rt.start() }
         .onDisappear { rt.stop() }
