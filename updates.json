@@ -1,0 +1,5 @@
+{
+  "version": "0.2.4",
+  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.2.4.dmg",
+  "notes": "Initial release. Sync hardened — latency compensation, echo-loop fix, tighter drift threshold, faster heartbeat."
+}

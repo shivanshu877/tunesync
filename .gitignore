@@ -1,8 +1,0 @@
-.build/
-.swiftpm/
-*.xcodeproj/
-DerivedData/
-.DS_Store
-*.app/
-TuneSync.app/
-*.dmg
