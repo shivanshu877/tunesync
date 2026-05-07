@@ -14,6 +14,7 @@ public final class AppRuntime: ObservableObject {
     public let player = PlayerController()
     public let engine: SyncEngine
     public let mesh: PeerMesh
+    public let updater = Updater()
 
     private var bridge: MeshBridge?
 
@@ -51,11 +52,13 @@ public final class AppRuntime: ObservableObject {
     public func start() {
         engine.start()
         mesh.start()
+        updater.startPeriodicChecks()
     }
 
     public func stop() {
         engine.stop()
         mesh.stop()
+        updater.stop()
     }
 
     public func changeRoom(_ name: String) {
@@ -102,10 +105,12 @@ final class MeshBridge: PeerMeshDelegate, @unchecked Sendable {
 }
 
 public struct ContentView: View {
-    @StateObject private var rt = AppRuntime()
+    @ObservedObject var rt: AppRuntime
     @State private var showSidebar: Bool = false
 
-    public init() {}
+    public init(rt: AppRuntime) {
+        self.rt = rt
+    }
 
     public var body: some View {
         HStack(spacing: 0) {
