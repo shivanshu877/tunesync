@@ -14,8 +14,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "TuneSync",
-            dependencies: ["TuneSyncCore"],
-            resources: [.process("Resources")]
+            dependencies: ["TuneSyncCore"]
         ),
         .testTarget(
             name: "TuneSyncCoreTests",

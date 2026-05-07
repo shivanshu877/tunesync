@@ -22,13 +22,8 @@ public struct WebViewHost: NSViewRepresentable {
         let userContent = WKUserContentController()
         userContent.add(context.coordinator, name: "tunesync")
 
-        if let url = Bundle.module.url(forResource: "injected", withExtension: "js"),
-           let js = try? String(contentsOf: url, encoding: .utf8) {
-            let script = WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
-            userContent.addUserScript(script)
-        } else {
-            Log.player.error("could not load injected.js from bundle")
-        }
+        let script = WKUserScript(source: InjectedJS.source, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+        userContent.addUserScript(script)
 
         cfg.userContentController = userContent
 

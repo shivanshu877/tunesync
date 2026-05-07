@@ -1,3 +1,7 @@
+import Foundation
+
+enum InjectedJS {
+    static let source: String = #"""
 (function () {
   if (window.__TUNESYNC_INSTALLED__) return;
   window.__TUNESYNC_INSTALLED__ = true;
@@ -92,3 +96,5 @@
 
   console.info("[tunesync] injected");
 })();
+"""#
+}
