@@ -1,5 +1,5 @@
 {
-  "version": "0.2.8",
-  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.2.8.dmg",
-  "notes": "- fix(sync): track-change reliability — bypass cooldown, hook more events, poll for videoId changes\n- build: bump local Makefile to 0.2.7 for consistency"
+  "version": "0.2.9",
+  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.2.9.dmg",
+  "notes": "- fix(sync): account for receiver execution overhead in latency comp\n- build: bump local Makefile to 0.2.8 for consistency"
 }
