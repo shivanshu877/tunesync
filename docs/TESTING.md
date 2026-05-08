@@ -82,3 +82,31 @@ These require two Macs on the same Wi-Fi.
 2. On Mac B: in Activity Monitor, force-kill TuneSync (don't quit gracefully — skip the bye).
 3. Mac A's peer list should drop Mac B within ~25s (no `bye` received, ping timeout fires).
 4. Diagnostics: `Ping timeouts` increments by 1.
+
+## Sync tightness scenarios (post 0.2.9)
+
+Two Macs same Wi-Fi, both signed into YT Music.
+
+### Track-start alignment
+
+1. Mac A (host) plays a fresh track.
+2. Listen for offset between Macs by ear (or record both speakers on a phone).
+3. Target: ≤ 300 ms.
+
+### Steady-state drift
+
+1. Both Macs playing same track, host driving.
+2. Let play 60 s without interaction.
+3. Target: offset stays ≤ 150 ms (no audible drift).
+4. Diagnostics should show non-zero `off:` per peer (NTP offset in ms).
+
+### Seek
+
+1. Host seeks to 1:30.
+2. Within 2 s, guest is at 1:30 ± 200 ms.
+
+### Ad on host
+
+1. Wait for an ad on host (or sign out so YT serves ads).
+2. Guest's TuneSync should mute + pause within 1 s of ad start.
+3. When ad ends, guest unmutes and resumes in sync.
