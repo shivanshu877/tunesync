@@ -157,8 +157,18 @@ public final class PeerMesh: @unchecked Sendable {
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             let next = trimmed.isEmpty ? "default" : trimmed
             if next == room { return }
+
+            // Polite goodbye to current peers so they remove us instantly.
+            let bye = SyncMessage.bye(ByeMessage(senderId: senderId))
+            if let data = try? JSONEncoder().encode(bye) {
+                let frame = FrameCodec.encode(data)
+                for (_, p) in peers {
+                    p.connection.send(content: frame, completion: .contentProcessed { _ in })
+                }
+            }
+
             room = next
-            // Drop all peers + restart with new room
+            stopping = true
             for (_, p) in peers { p.connection.cancel() }
             peers.removeAll()
             for (_, c) in pendingByEndpoint { c.cancel() }
@@ -166,13 +176,17 @@ public final class PeerMesh: @unchecked Sendable {
             pendingParsers.removeAll()
             discovered.removeAll()
             kicked.removeAll()
-            stopping = true
             listener?.cancel()
             browser?.cancel()
-            stopping = false
-            startListener()
-            startBrowser()
-            notifyChange()
+
+            // Let mDNS goodbye propagate before re-listening.
+            queue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+                guard let self else { return }
+                self.stopping = false
+                self.startListener()
+                self.startBrowser()
+                self.notifyChange()
+            }
         }
     }
 
