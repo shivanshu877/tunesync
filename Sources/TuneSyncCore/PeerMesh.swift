@@ -230,10 +230,28 @@ public final class PeerMesh: @unchecked Sendable {
             if kicked.contains(id) { continue }
             if pendingByEndpoint[result.endpoint] != nil { continue }
 
-            let conn = NWConnection(to: result.endpoint, using: .tcp)
-            pendingByEndpoint[result.endpoint] = conn
-            pendingParsers[result.endpoint] = FrameParser()
-            configureConnection(conn, side: .outgoing)
+            if MeshPolicy.shouldDial(localId: senderId, remoteId: id) {
+                let conn = NWConnection(to: result.endpoint, using: .tcp)
+                pendingByEndpoint[result.endpoint] = conn
+                pendingParsers[result.endpoint] = FrameParser()
+                configureConnection(conn, side: .outgoing)
+            } else {
+                // Fallback dial: if we're the higher-id peer and the lower-id peer
+                // never connects within 5s (asymmetric reachability), dial anyway.
+                let endpoint = result.endpoint
+                let remoteId = id
+                queue.asyncAfter(deadline: .now() + .seconds(5)) { [weak self] in
+                    guard let self else { return }
+                    if self.peers[remoteId] != nil { return }
+                    if self.pendingByEndpoint[endpoint] != nil { return }
+                    if self.kicked.contains(remoteId) { return }
+                    Log.mesh.info("fallback dial \(remoteId, privacy: .public) — tie-break peer never connected")
+                    let conn = NWConnection(to: endpoint, using: .tcp)
+                    self.pendingByEndpoint[endpoint] = conn
+                    self.pendingParsers[endpoint] = FrameParser()
+                    self.configureConnection(conn, side: .outgoing)
+                }
+            }
         }
 
         if newDiscovered != discovered {
