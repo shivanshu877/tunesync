@@ -44,8 +44,14 @@ public final class AppRuntime: ObservableObject {
         self.engine = engine
         self.mesh = mesh
 
-        self.engine.applyStateOverride { [weak self] state in
-            DispatchQueue.main.async { self?.player.applyState(state) }
+        self.engine.peerOffsetLookup = { [weak mesh] senderId in
+            mesh?.peerOffsetMs(senderId: senderId)
+        }
+
+        self.engine.applyStateExtended = { [weak self] state, atMs, adOnHost in
+            DispatchQueue.main.async {
+                self?.player.applyState(state, applyAtMs: atMs, adOnHost: adOnHost)
+            }
         }
 
         self.player.onLocalState = { [weak self] state in

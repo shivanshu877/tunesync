@@ -138,33 +138,58 @@ enum InjectedJS {
     });
   }
 
-  window.tunesyncApplyState = function (videoId, t, playing) {
+  window.tunesyncApplyState = function (videoId, t, playing, atMs, adOnHost) {
     var v = getVideo();
     if (!v) return false;
     var current = getVideoId();
     var changed = false;
 
+    // Ad-on-host: pause + mute regardless of other params.
+    if (adOnHost) {
+        if (!v.muted) { v.muted = true; }
+        if (!v.paused) { v.pause(); }
+        lastAppliedAt = Date.now();
+        return true;
+    } else {
+        if (v.muted) { v.muted = false; }
+    }
+
     if (videoId && videoId !== current) {
-      // Set lastApplied BEFORE navigating — the page reload re-runs this
-      // script, but lastAppliedVideoId is module-scope and gets reset.
-      // We restamp it post-navigation via the URL search param fallback.
-      lastAppliedAt = Date.now();
-      lastAppliedVideoId = videoId;
-      var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
-      window.location.href = dest;
-      return true;
+        lastAppliedAt = Date.now();
+        lastAppliedVideoId = videoId;
+        var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
+        window.location.href = dest;
+        return true;
     }
 
-    if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 1.0) {
-      try { v.currentTime = t; changed = true; } catch (e) {}
+    function doApply() {
+        var diff = (typeof t === "number") ? (v.currentTime || 0) - t : 0;
+        var absDiff = Math.abs(diff);
+        if (absDiff > 0.5) {
+            try { v.currentTime = t; changed = true; } catch (e) {}
+            v.playbackRate = 1.0;
+        } else if (absDiff > 0.05) {
+            v.playbackRate = (diff > 0) ? 0.98 : 1.02;
+            setTimeout(function () { v.playbackRate = 1.0; }, Math.max(200, absDiff * 1000 * 50));
+        } else {
+            v.playbackRate = 1.0;
+        }
+        if (playing && v.paused) { v.play().catch(function () {}); changed = true; }
+        if (!playing && !v.paused) { v.pause(); changed = true; }
+        if (changed) {
+            lastAppliedAt = Date.now();
+            lastAppliedVideoId = videoId || current;
+        }
     }
-    if (playing && v.paused) { v.play().catch(function () {}); changed = true; }
-    if (!playing && !v.paused) { v.pause(); changed = true; }
 
-    if (changed) {
-      lastAppliedAt = Date.now();
-      lastAppliedVideoId = videoId || current;
+    if (typeof atMs === "number" && atMs !== null) {
+        var wait = atMs - Date.now();
+        if (wait > 0 && wait < 1000) {
+            setTimeout(doApply, wait);
+            return true;
+        }
     }
+    doApply();
     return true;
   };
 
@@ -190,7 +215,7 @@ enum InjectedJS {
   // Periodic catch-up for slow drifts (e.g., user lets a song play untouched).
   setInterval(reportState, 5000);
 
-  console.info("[tunesync] injected (v0.2.8)");
+  console.info("[tunesync] injected (v0.2.9)");
 })();
 """#
 }

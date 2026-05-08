@@ -63,9 +63,11 @@ public final class PlayerController: NSObject {
         onLocalState?(PlayerState(videoId: videoId, t: t, playing: playing))
     }
 
-    public func applyState(_ state: PlayerState) {
+    public func applyState(_ state: PlayerState, applyAtMs: Int64? = nil, adOnHost: Bool = false) {
         guard let wv = webView else { return }
-        let js = "window.tunesyncApplyState && window.tunesyncApplyState(\(jsString(state.videoId)), \(state.t), \(state.playing));"
+        let atMs = applyAtMs.map { String($0) } ?? "null"
+        let ad = adOnHost ? "true" : "false"
+        let js = "window.tunesyncApplyState && window.tunesyncApplyState(\(jsString(state.videoId)), \(state.t), \(state.playing), \(atMs), \(ad));"
         wv.evaluateJavaScript(js) { _, error in
             if let error {
                 Log.player.error("applyState JS error: \(error.localizedDescription, privacy: .public)")
