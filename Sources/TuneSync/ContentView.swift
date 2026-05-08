@@ -14,6 +14,14 @@ public final class AppRuntime: ObservableObject {
     @Published public var syncHistory: [SyncEntry] = []
     @Published public var role: Role = .unset
 
+    /// Wall-clock (ms since epoch) when the next scheduled play will
+    /// fire. Nil when nothing is scheduled (the steady state).
+    @Published public var scheduledAtMs: Int64?
+    /// How late this Mac received the scheduled message — only meaningful
+    /// when scheduledAtMs is set. Helps the user understand whether their
+    /// network is the slow link in the room.
+    @Published public var networkDelayMs: Int64 = 0
+
     public var peerCount: Int { connectedPeers.count }
     public var senderId: String { engine.senderId }
     public var hostDisplayName: String? {
@@ -43,7 +51,17 @@ public final class AppRuntime: ObservableObject {
         self.mesh = mesh
 
         self.engine.applyStateOverride { [weak self] state, startAtMs in
-            DispatchQueue.main.async { self?.player.applyState(state, startAtMs: startAtMs) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.player.applyState(state, startAtMs: startAtMs)
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                if let s = startAtMs, s > nowMs, state.playing {
+                    self.scheduledAtMs = s
+                } else {
+                    self.scheduledAtMs = nil
+                    self.networkDelayMs = 0
+                }
+            }
         }
 
         self.player.onLocalState = { [weak self] state in
@@ -140,7 +158,15 @@ public final class AppRuntime: ObservableObject {
 
     fileprivate func received(_ message: SyncMessage, from peerId: String) {
         if case .state(let s) = message {
-            DispatchQueue.main.async { self.lastWriter = String(s.senderId.prefix(8)) }
+            DispatchQueue.main.async {
+                self.lastWriter = String(s.senderId.prefix(8))
+                // Capture network delay only on scheduled messages — that's
+                // when it matters for the countdown UI to display.
+                if let cms = s.clientMs, s.startAtMs != nil {
+                    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                    self.networkDelayMs = max(0, nowMs - cms)
+                }
+            }
         }
         engine.handleRemote(message)
     }
@@ -181,8 +207,12 @@ public struct ContentView: View {
     public var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
-                WebViewHost(player: rt.player)
-                    .frame(minWidth: 800, minHeight: 600)
+                ZStack {
+                    WebViewHost(player: rt.player)
+                        .frame(minWidth: 800, minHeight: 600)
+                    CountdownOverlay(rt: rt)
+                        .allowsHitTesting(false)
+                }
                 StatusBar(
                     peerCount: .init(get: { rt.peerCount }, set: { _ in }),
                     lastWriter: .init(get: { rt.lastWriter }, set: { _ in }),

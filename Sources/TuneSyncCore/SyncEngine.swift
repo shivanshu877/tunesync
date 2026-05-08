@@ -111,7 +111,7 @@ public final class SyncEngine: @unchecked Sendable {
         heartbeatSeconds: Int = 1,
         applyOverheadMs: Int = 250,
         compCapMs: Int = 1500,
-        scheduleBufferMs: Int = 250
+        scheduleBufferMs: Int = 3000
     ) {
         self.senderId = senderId
         self.broadcast = broadcast
