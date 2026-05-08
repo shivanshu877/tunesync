@@ -166,7 +166,7 @@ public final class SyncEngine: @unchecked Sendable {
                 videoId: s.videoId, t: effectiveT, playing: s.playing,
                 at: Date(), note: compNote
             ))
-        case .hello, .bye:
+        case .hello, .bye, .ping, .pong:
             break
         }
     }

@@ -60,13 +60,35 @@ public struct ByeMessage: Codable, Equatable, Sendable {
     }
 }
 
+public struct PingMessage: Codable, Equatable, Sendable {
+    public let senderId: String
+    public let nonce: Int64
+
+    public init(senderId: String, nonce: Int64) {
+        self.senderId = senderId
+        self.nonce = nonce
+    }
+}
+
+public struct PongMessage: Codable, Equatable, Sendable {
+    public let senderId: String
+    public let nonce: Int64
+
+    public init(senderId: String, nonce: Int64) {
+        self.senderId = senderId
+        self.nonce = nonce
+    }
+}
+
 public enum SyncMessage: Codable, Equatable, Sendable {
     case state(StateMessage)
     case hello(HelloMessage)
     case bye(ByeMessage)
+    case ping(PingMessage)
+    case pong(PongMessage)
 
     private enum Kind: String, Codable {
-        case state, hello, bye
+        case state, hello, bye, ping, pong
     }
 
     private enum Keys: String, CodingKey {
@@ -80,6 +102,8 @@ public enum SyncMessage: Codable, Equatable, Sendable {
         case .state: self = .state(try StateMessage(from: decoder))
         case .hello: self = .hello(try HelloMessage(from: decoder))
         case .bye:   self = .bye(try ByeMessage(from: decoder))
+        case .ping:  self = .ping(try PingMessage(from: decoder))
+        case .pong:  self = .pong(try PongMessage(from: decoder))
         }
     }
 
@@ -94,6 +118,12 @@ public enum SyncMessage: Codable, Equatable, Sendable {
             try m.encode(to: encoder)
         case .bye(let m):
             try c.encode(Kind.bye, forKey: .kind)
+            try m.encode(to: encoder)
+        case .ping(let m):
+            try c.encode(Kind.ping, forKey: .kind)
+            try m.encode(to: encoder)
+        case .pong(let m):
+            try c.encode(Kind.pong, forKey: .kind)
             try m.encode(to: encoder)
         }
     }

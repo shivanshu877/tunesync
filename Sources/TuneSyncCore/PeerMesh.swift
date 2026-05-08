@@ -355,6 +355,8 @@ public final class PeerMesh: @unchecked Sendable {
                     delegate?.peerMesh(self, received: msg, from: id)
                     removePeer(id: id)
                 }
+            case .ping, .pong:
+                break
             }
         }
     }

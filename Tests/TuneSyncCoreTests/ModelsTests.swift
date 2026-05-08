@@ -43,4 +43,23 @@ final class ModelsTests: XCTestCase {
         }
         XCTAssertEqual(b.senderId, "abc")
     }
+
+    func testPingMessageRoundTrip() throws {
+        let original = SyncMessage.ping(PingMessage(senderId: "A", nonce: 42))
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(SyncMessage.self, from: data)
+        XCTAssertEqual(decoded, original)
+    }
+
+    func testPongMessageRoundTrip() throws {
+        let original = SyncMessage.pong(PongMessage(senderId: "B", nonce: 42))
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(SyncMessage.self, from: data)
+        XCTAssertEqual(decoded, original)
+    }
+
+    func testUnknownKindIsIgnoredGracefully() {
+        let bogus = #"{"kind":"future-thing","senderId":"X"}"#.data(using: .utf8)!
+        XCTAssertThrowsError(try JSONDecoder().decode(SyncMessage.self, from: bogus))
+    }
 }
