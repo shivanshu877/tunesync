@@ -192,6 +192,7 @@ public struct ContentView: View {
     @ObservedObject var rt: AppRuntime
     @State private var showSidebar: Bool = false
     @State private var searchQuery: String = ""
+    @State private var showImportSheet: Bool = false
 
     public init(rt: AppRuntime) {
         self.rt = rt
@@ -219,12 +220,21 @@ public struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                Button { showImportSheet = true } label: {
+                    Label("Import session", systemImage: "key.fill")
+                }
+                .help("Import a YouTube Music session from another browser")
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showSidebar.toggle() } }) {
                     Label(showSidebar ? "Hide Peers" : "Show Peers",
                           systemImage: showSidebar ? "sidebar.right" : "person.2")
                 }
                 .help(showSidebar ? "Hide Connection Manager" : "Show Connection Manager")
             }
+        }
+        .sheet(isPresented: $showImportSheet) {
+            CookieImportSheet(rt: rt)
         }
         .onAppear { rt.start() }
         .onDisappear { rt.stop() }
