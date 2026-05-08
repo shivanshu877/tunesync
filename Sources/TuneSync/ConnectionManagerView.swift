@@ -188,6 +188,7 @@ public struct ConnectionManagerView: View {
             diagRow("Path", "\(d.pathStatus)\(d.interface.map { " (\($0))" } ?? "")")
             diagRow("Restarts", "L:\(d.listenerRestarts) B:\(d.browserRestarts) P:\(d.pathRestarts)")
             diagRow("Ping timeouts", "\(d.pingTimeouts)")
+            diagRow("Bridge", "\(rt.bridgedClientCount) web client\(rt.bridgedClientCount == 1 ? "" : "s")")
             ForEach(d.peers, id: \.senderId) { p in
                 let rtt = p.rttMs > 0 ? "\(p.rttMs)ms" : (p.lastPongMs.map { "\($0)ms" } ?? "—")
                 let off = "\(p.offsetMs)ms"

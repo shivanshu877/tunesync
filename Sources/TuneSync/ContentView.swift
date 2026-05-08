@@ -273,7 +273,8 @@ public struct ContentView: View {
                     peerCount: .init(get: { rt.peerCount }, set: { _ in }),
                     lastWriter: .init(get: { rt.lastWriter }, set: { _ in }),
                     adShowing: .init(get: { rt.adShowing }, set: { _ in }),
-                    room: .init(get: { rt.currentRoom }, set: { _ in })
+                    room: .init(get: { rt.currentRoom }, set: { _ in }),
+                    bridgedClients: .init(get: { rt.bridgedClientCount }, set: { _ in })
                 )
             }
             if showSidebar {
