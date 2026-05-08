@@ -1,5 +1,5 @@
 {
-  "version": "0.2.10",
-  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.2.10.dmg",
-  "notes": "- feat(sync): scheduled play — both Macs trigger v.play() at the same wall-clock instant, eliminating play-moment latency"
+  "version": "0.2.11",
+  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.2.11.dmg",
+  "notes": "- feat(sync): 3-second scheduled play with countdown overlay\n- build: bump local Makefile to 0.2.10 for consistency"
 }
