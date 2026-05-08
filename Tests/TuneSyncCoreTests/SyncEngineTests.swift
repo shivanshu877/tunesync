@@ -104,14 +104,47 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(r.applies.count, 1)
     }
 
-    func testHeartbeatBroadcastsCurrentState() {
+    func testHeartbeatBroadcastsOnlyWhenHost() {
         let r = Recorder()
         let e = makeEngine(recorder: r)
         e.localStateChanged(PlayerState(videoId: "vid", t: 5, playing: true))
         e.flushDebounceForTesting()
-        XCTAssertEqual(r.broadcasts.count, 1)
+        XCTAssertEqual(r.broadcasts.count, 1, "local change always broadcasts")
+
         e.heartbeatTickForTesting()
-        XCTAssertEqual(r.broadcasts.count, 2)
+        XCTAssertEqual(r.broadcasts.count, 1, "heartbeat skipped when role is .unset")
+
+        e.role = .guest
+        e.heartbeatTickForTesting()
+        XCTAssertEqual(r.broadcasts.count, 1, "heartbeat skipped when role is .guest")
+
+        e.role = .host
+        e.heartbeatTickForTesting()
+        XCTAssertEqual(r.broadcasts.count, 2, "heartbeat fires when role is .host")
+    }
+
+    func testHostFlagAttachedToOutboundState() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        e.role = .host
+        e.localStateChanged(PlayerState(videoId: "vid", t: 5, playing: true))
+        e.flushDebounceForTesting()
+        guard case .state(let s) = r.broadcasts[0] else {
+            return XCTFail("expected state")
+        }
+        XCTAssertEqual(s.host, true)
+    }
+
+    func testHostFlagFalseWhenGuest() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        e.role = .guest
+        e.localStateChanged(PlayerState(videoId: "vid", t: 5, playing: true))
+        e.flushDebounceForTesting()
+        guard case .state(let s) = r.broadcasts[0] else {
+            return XCTFail("expected state")
+        }
+        XCTAssertEqual(s.host, false)
     }
 
     func testOutboundStateStampsClientMs() {

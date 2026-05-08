@@ -5,6 +5,15 @@ public struct ConnectedPeer: Equatable, Sendable {
     public let senderId: String
     public let displayName: String
     public let connectedAt: Date
+    /// True if this peer's most recent hello/state announced host=true.
+    public let isHost: Bool
+
+    public init(senderId: String, displayName: String, connectedAt: Date, isHost: Bool = false) {
+        self.senderId = senderId
+        self.displayName = displayName
+        self.connectedAt = connectedAt
+        self.isHost = isHost
+    }
 }
 
 public struct DiscoveredPeer: Equatable, Sendable {
@@ -26,6 +35,7 @@ public final class PeerMesh: @unchecked Sendable {
         let connection: NWConnection
         let connectedAt: Date
         var parser = FrameParser()
+        var isHost: Bool = false
     }
 
     private struct Discovered: Equatable {
@@ -39,6 +49,11 @@ public final class PeerMesh: @unchecked Sendable {
 
     public let senderId: String
     public let displayName: String
+
+    /// True if this Mac currently claims host. Set by the app when the
+    /// user toggles role; sent in every outgoing hello and stamped on
+    /// every state message via SyncEngine.
+    public var isHostClaim: Bool = false
 
     private let serviceType: String
     private let queue = DispatchQueue(label: "com.tunesync.mesh")
@@ -248,7 +263,9 @@ public final class PeerMesh: @unchecked Sendable {
     }
 
     private func sendHello(on conn: NWConnection) {
-        let hello = SyncMessage.hello(HelloMessage(senderId: senderId, displayName: displayName))
+        let hello = SyncMessage.hello(HelloMessage(
+            senderId: senderId, displayName: displayName, host: isHostClaim
+        ))
         guard let data = try? JSONEncoder().encode(hello) else { return }
         let frame = FrameCodec.encode(data)
         conn.send(content: frame, completion: .contentProcessed { _ in })
@@ -295,30 +312,47 @@ public final class PeerMesh: @unchecked Sendable {
             guard let msg = try? JSONDecoder().decode(SyncMessage.self, from: frame) else { continue }
             switch msg {
             case .hello(let h):
-                if peers[h.senderId] == nil, h.senderId != senderId {
+                // Update existing peer's host claim if we already know them
+                if peers[h.senderId] != nil {
+                    let newHost = h.host ?? false
+                    if peers[h.senderId]!.isHost != newHost {
+                        peers[h.senderId]!.isHost = newHost
+                        notifyChange()
+                    }
+                } else if h.senderId != senderId {
                     if kicked.contains(h.senderId) {
                         conn.cancel()
                         continue
                     }
-                    let pc = PeerConn(
+                    var pc = PeerConn(
                         id: h.senderId,
                         displayName: h.displayName,
                         connection: conn,
                         connectedAt: Date(),
                         parser: parser
                     )
+                    pc.isHost = h.host ?? false
                     peers[h.senderId] = pc
                     pendingByEndpoint.removeValue(forKey: endpoint)
                     pendingParsers.removeValue(forKey: endpoint)
-                    Log.mesh.info("peer connected: \(h.senderId, privacy: .public) (\(h.displayName, privacy: .public))")
+                    Log.mesh.info("peer connected: \(h.senderId, privacy: .public) (\(h.displayName, privacy: .public)) host=\(pc.isHost, privacy: .public)")
                     sendHello(on: conn)
                     notifyChange()
                 }
-            case .state, .bye:
+            case .state(let s):
+                // Track host claims that arrive via state messages, not just hello
+                if let pid = existingPeerId ?? peerId(forEndpoint: endpoint),
+                   let claimed = s.host,
+                   peers[pid]?.isHost != claimed {
+                    peers[pid]?.isHost = claimed
+                    notifyChange()
+                }
                 if let id = existingPeerId ?? peerId(forEndpoint: endpoint) {
                     delegate?.peerMesh(self, received: msg, from: id)
                 }
-                if case .bye = msg, let id = existingPeerId ?? peerId(forEndpoint: endpoint) {
+            case .bye:
+                if let id = existingPeerId ?? peerId(forEndpoint: endpoint) {
+                    delegate?.peerMesh(self, received: msg, from: id)
                     removePeer(id: id)
                 }
             }
@@ -353,7 +387,7 @@ public final class PeerMesh: @unchecked Sendable {
 
     private func notifyChange() {
         let connected: [ConnectedPeer] = peers.values
-            .map { ConnectedPeer(senderId: $0.id, displayName: $0.displayName, connectedAt: $0.connectedAt) }
+            .map { ConnectedPeer(senderId: $0.id, displayName: $0.displayName, connectedAt: $0.connectedAt, isHost: $0.isHost) }
             .sorted { $0.connectedAt < $1.connectedAt }
 
         let connectedIds = Set(connected.map { $0.senderId })
@@ -364,5 +398,16 @@ public final class PeerMesh: @unchecked Sendable {
 
         let snap = (connected, disc, room)
         delegate?.peerMesh(self, peersChanged: snap.0, discovered: snap.1, room: snap.2)
+    }
+
+    /// Re-broadcasts hello to every connected peer. Call after toggling
+    /// isHostClaim so peers learn the new role immediately rather than
+    /// waiting for the next state heartbeat.
+    public func reannounce() {
+        queue.async { [self] in
+            for (_, p) in peers {
+                sendHello(on: p.connection)
+            }
+        }
     }
 }

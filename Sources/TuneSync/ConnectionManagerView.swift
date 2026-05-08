@@ -15,6 +15,7 @@ public struct ConnectionManagerView: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    hostSection
                     roomSection
                     connectedSection
                     discoveredSection
@@ -39,6 +40,54 @@ public struct ConnectionManagerView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+    }
+
+    private var hostSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionLabel("HOST")
+            switch rt.role {
+            case .host:
+                HStack(spacing: 8) {
+                    Image(systemName: "crown.fill").foregroundColor(.yellow)
+                    Text("This Mac is hosting")
+                        .font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Button("Step Down") { rt.stepDown() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                }
+                Text("Your playback drives everyone else's. Heartbeats are coming from this Mac.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            case .guest:
+                HStack(spacing: 8) {
+                    Image(systemName: "crown").foregroundColor(.secondary)
+                    Text("Hosted by \(rt.hostDisplayName ?? "—")")
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    Spacer()
+                    Button("Take Over") { rt.becomeHost() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                }
+                Text("Following the host's playhead. You can still pause / change tracks here.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            case .unset:
+                HStack(spacing: 8) {
+                    Image(systemName: "crown").foregroundColor(.secondary)
+                    Text("No host")
+                        .font(.system(size: 13, weight: .medium))
+                    Spacer()
+                    Button("Become Host") { rt.becomeHost() }
+                        .buttonStyle(.borderless)
+                        .font(.system(size: 11))
+                }
+                Text("Without a host, peers don't periodically re-sync. One peer should claim host.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
     }
 
     private var roomSection: some View {
@@ -72,9 +121,16 @@ public struct ConnectionManagerView: View {
                             .fill(Color.green)
                             .frame(width: 8, height: 8)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(peer.displayName)
-                                .font(.system(size: 13, weight: .medium))
-                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                Text(peer.displayName)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .lineLimit(1)
+                                if peer.isHost {
+                                    Image(systemName: "crown.fill")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.yellow)
+                                }
+                            }
                             Text(peer.senderId.prefix(8))
                                 .font(.system(size: 10, design: .monospaced))
                                 .foregroundColor(.secondary)

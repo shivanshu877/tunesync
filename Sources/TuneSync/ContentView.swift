@@ -12,9 +12,14 @@ public final class AppRuntime: ObservableObject {
     @Published public var lastDiag: DiagSnapshot?
     @Published public var lastLocalState: PlayerState?
     @Published public var syncHistory: [SyncEntry] = []
+    @Published public var role: Role = .unset
 
     public var peerCount: Int { connectedPeers.count }
     public var senderId: String { engine.senderId }
+    public var hostDisplayName: String? {
+        if role == .host { return Host.current().localizedName ?? "This Mac" }
+        return connectedPeers.first(where: { $0.isHost })?.displayName
+    }
 
     public let player = PlayerController()
     public let engine: SyncEngine
@@ -87,6 +92,52 @@ public final class AppRuntime: ObservableObject {
         mesh.reconnect(senderId: senderId)
     }
 
+    public func becomeHost() {
+        role = .host
+        engine.role = .host
+        mesh.isHostClaim = true
+        mesh.reannounce()
+    }
+
+    public func stepDown() {
+        // If a remote peer is currently host, demote ourselves to guest;
+        // otherwise revert to unset (no host in the room).
+        let remoteHost = connectedPeers.first(where: { $0.isHost })
+        role = (remoteHost != nil) ? .guest : .unset
+        engine.role = role
+        mesh.isHostClaim = false
+        mesh.reannounce()
+    }
+
+    /// Auto-demote ourselves to guest if a remote peer claims host while
+    /// we don't (or if a remote peer with a smaller senderId also claims
+    /// host alongside us — tiebreak prevents both from heartbeating).
+    fileprivate func reconcileRole() {
+        let remoteHosts = connectedPeers.filter { $0.isHost }
+        let remoteHost = remoteHosts.first
+        switch role {
+        case .unset:
+            if remoteHost != nil {
+                role = .guest
+                engine.role = .guest
+            }
+        case .guest:
+            if remoteHost == nil {
+                role = .unset
+                engine.role = .unset
+            }
+        case .host:
+            // Conflict: another peer also claims host. Lower senderId wins.
+            if let other = remoteHosts.first(where: { $0.senderId < senderId }) {
+                Log.player.info("yielding host to \(other.senderId, privacy: .public) (lower senderId)")
+                role = .guest
+                engine.role = .guest
+                mesh.isHostClaim = false
+                mesh.reannounce()
+            }
+        }
+    }
+
     fileprivate func received(_ message: SyncMessage, from peerId: String) {
         if case .state(let s) = message {
             DispatchQueue.main.async { self.lastWriter = String(s.senderId.prefix(8)) }
@@ -99,6 +150,7 @@ public final class AppRuntime: ObservableObject {
             self.connectedPeers = connected
             self.discoveredPeers = discovered
             self.currentRoom = room
+            self.reconcileRole()
         }
     }
 }

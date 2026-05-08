@@ -23,30 +23,32 @@ public struct StateMessage: Codable, Equatable, Sendable {
     public let t: Double
     public let playing: Bool
     /// Sender's wall-clock (ms since epoch) when the message was encoded.
-    /// Used by the receiver to compensate for network latency: the receiver
-    /// advances `t` by (localNow - clientMs) when applying play-state, so
-    /// peers stay aligned to "where the song actually is now," not where it
-    /// was when the message left the sender. Optional for backwards-compat
-    /// with older clients that didn't include it.
     public let clientMs: Int64?
+    /// True if the sender is currently claiming the host role. Used so
+    /// receivers know which peer to treat as the authoritative heartbeat
+    /// source. Optional for backwards compat.
+    public let host: Bool?
 
-    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool, clientMs: Int64? = nil) {
+    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool, clientMs: Int64? = nil, host: Bool? = nil) {
         self.senderId = senderId
         self.ts = ts
         self.videoId = videoId
         self.t = t
         self.playing = playing
         self.clientMs = clientMs
+        self.host = host
     }
 }
 
 public struct HelloMessage: Codable, Equatable, Sendable {
     public let senderId: String
     public let displayName: String
+    public let host: Bool?
 
-    public init(senderId: String, displayName: String) {
+    public init(senderId: String, displayName: String, host: Bool? = nil) {
         self.senderId = senderId
         self.displayName = displayName
+        self.host = host
     }
 }
 

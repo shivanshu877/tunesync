@@ -23,8 +23,24 @@ public struct SyncEntry: Sendable, Equatable {
     }
 }
 
+public enum Role: String, Sendable, Equatable {
+    /// Default state — no one's claimed host yet. Heartbeats are silenced.
+    /// Outbound state still goes on user-driven local change.
+    case unset
+    /// Authoritative source. Only the host's heartbeat broadcasts.
+    case host
+    /// Reacts to remote state and to local user actions, but never heartbeats.
+    case guest
+}
+
 public final class SyncEngine: @unchecked Sendable {
     public let senderId: String
+
+    /// Current role. Heartbeats only fire when role == .host. Local changes
+    /// still broadcast in any role (so anyone can hit pause and have it
+    /// propagate — guests just don't keep reasserting their position).
+    public var role: Role = .unset
+
     public var adShowing: Bool = false {
         didSet {
             if adShowing != oldValue {
@@ -184,6 +200,9 @@ public final class SyncEngine: @unchecked Sendable {
     }
 
     private func heartbeatTick() {
+        // Only the host heartbeats. Guests/unset never reassert their
+        // position on a timer — that was the source of the sync war.
+        guard role == .host else { return }
         guard let s = lastLocalState else { return }
         if adShowing { return }
         let msg = buildStateMessage(s)
@@ -191,7 +210,7 @@ public final class SyncEngine: @unchecked Sendable {
         appendHistory(SyncEntry(
             direction: .sent, senderId: senderId,
             videoId: s.videoId, t: s.t, playing: s.playing,
-            at: Date(), note: "heartbeat"
+            at: Date(), note: "host heartbeat"
         ))
     }
 
@@ -201,7 +220,8 @@ public final class SyncEngine: @unchecked Sendable {
         return SyncMessage.state(StateMessage(
             senderId: senderId, ts: ts,
             videoId: s.videoId, t: s.t, playing: s.playing,
-            clientMs: nowMs
+            clientMs: nowMs,
+            host: role == .host
         ))
     }
 
