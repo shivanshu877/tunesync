@@ -42,6 +42,7 @@ public final class PeerMesh: @unchecked Sendable {
         var lastPongMs: Int? = nil
         var lastPingNonce: Int64? = nil
         var lastPingAt: Date? = nil
+        var clockSync = ClockSync(windowSize: 5)
     }
 
     private struct Discovered: Equatable {
@@ -174,6 +175,12 @@ public final class PeerMesh: @unchecked Sendable {
                 pingTimeouts: pingTimeoutCount,
                 peers: peerLiveness
             )
+        }
+    }
+
+    public func peerOffsetMs(senderId id: String) -> Int? {
+        return queue.sync {
+            return peers[id]?.clockSync.estimatedOffsetMs()
         }
     }
 
@@ -514,7 +521,9 @@ public final class PeerMesh: @unchecked Sendable {
                 }
             case .ping(let p):
                 guard let id = existingPeerId ?? peerId(forEndpoint: endpoint) else { continue }
-                let reply = SyncMessage.pong(PongMessage(senderId: senderId, nonce: p.nonce))
+                let t1 = Int64(Date().timeIntervalSince1970 * 1000)
+                let t2 = Int64(Date().timeIntervalSince1970 * 1000)
+                let reply = SyncMessage.pong(PongMessage(senderId: senderId, nonce: p.nonce, t0: p.t0, t1: t1, t2: t2))
                 if let data = try? JSONEncoder().encode(reply) {
                     let frame = FrameCodec.encode(data)
                     peers[id]?.connection.send(content: frame, completion: .contentProcessed { _ in })
@@ -528,6 +537,8 @@ public final class PeerMesh: @unchecked Sendable {
                 pc.lastPongMs = rttMs
                 pc.lastPingNonce = nil
                 pc.lastPingAt = nil
+                let t3 = Int64(Date().timeIntervalSince1970 * 1000)
+                pc.clockSync.recordSample(t0: p.t0, t1: p.t1, t2: p.t2, t3: t3)
                 peers[id] = pc
             }
         }
@@ -593,7 +604,8 @@ public final class PeerMesh: @unchecked Sendable {
                 pc.lastPingAt = now
                 pc.lastPingNonce = nonceCounter
                 peers[id] = pc
-                let msg = SyncMessage.ping(PingMessage(senderId: senderId, nonce: nonceCounter))
+                let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+                let msg = SyncMessage.ping(PingMessage(senderId: senderId, nonce: nonceCounter, t0: nowMs))
                 if let data = try? JSONEncoder().encode(msg) {
                     pc.connection.send(content: FrameCodec.encode(data), completion: .contentProcessed { _ in })
                 }
