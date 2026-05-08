@@ -215,7 +215,30 @@ enum InjectedJS {
   // Periodic catch-up for slow drifts (e.g., user lets a song play untouched).
   setInterval(reportState, 5000);
 
-  console.info("[tunesync] injected (v0.2.9)");
+  // Sign-in nag hider. YT Music throws up a signin promo / popup container
+  // shortly after landing on the home page, even though playback works
+  // signed-out. We hide them as they appear so the user never sees a
+  // blocking dialog.
+  function hideSigninNag() {
+    var sels = [
+      "ytmusic-signin-prompt",
+      "ytmusic-popup-container",
+      "ytmusic-mealbar-promo-renderer",
+      "tp-yt-iron-overlay-backdrop",
+      "ytmusic-you-there-renderer"
+    ];
+    sels.forEach(function (sel) {
+      document.querySelectorAll(sel).forEach(function (el) {
+        el.style.setProperty("display", "none", "important");
+        el.setAttribute("aria-hidden", "true");
+      });
+    });
+  }
+  hideSigninNag();
+  var nagObserver = new MutationObserver(function () { hideSigninNag(); });
+  nagObserver.observe(document.documentElement, { childList: true, subtree: true });
+
+  console.info("[tunesync] injected (v0.2.10)");
 })();
 """#
 }
