@@ -151,3 +151,26 @@ Two Macs same Wi-Fi, both signed into YT Music.
 
 1. Click "Clear imported session" in sheet.
 2. WebView reloads to signed-out state.
+
+## Web-client scenarios (post 0.4.0)
+
+### Phone joins room
+
+1. Mac in same room. TuneSync running. macOS may prompt for Local Network on first run — approve.
+2. Diagnostics shows "Bridge" row with "0 web clients".
+3. On a phone or other device on the same Wi-Fi: open `http://<mac-ip>:8732/`.
+4. Page loads, status flips from "connecting…" to "connected".
+5. Status bar on Mac shows "1 web". Diagnostics shows "1 web client".
+
+### Sync to web
+
+1. Play a track on the Mac.
+2. Web client loads the track, plays in sync (within ~200 ms).
+3. Pause on Mac. Web client pauses.
+
+### Election handover
+
+1. Two Macs (A: lower senderId, B: higher), both running.
+2. A is the bridge. Phone connects to A's IP.
+3. Quit A. After ~25 s (peer drop window), B should become the bridge.
+4. On phone, refresh against B's IP. Reconnects.
