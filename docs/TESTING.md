@@ -110,3 +110,23 @@ Two Macs same Wi-Fi, both signed into YT Music.
 1. Wait for an ad on host (or sign out so YT serves ads).
 2. Guest's TuneSync should mute + pause within 1 s of ad start.
 3. When ad ends, guest unmutes and resumes in sync.
+
+## Anonymous-playback scenarios (post 0.2.10)
+
+### Cold start, no sign-in
+
+1. Clear app data: `rm -rf ~/Library/WebKit/TuneSync ~/Library/Caches/TuneSync` then relaunch.
+2. Launch. App lands on YT Music home.
+3. No sign-in modal blocks the view (it may briefly flash, but disappears).
+4. Top of window shows a search bar.
+
+### Search and play
+
+1. Type "lofi" in the search bar; press Enter.
+2. WebView navigates to a YT Music search result page.
+3. Click any track. Plays without a sign-in prompt.
+
+### Two Macs, neither signed in
+
+1. Both Macs on same Wi-Fi, both signed-out.
+2. Mac A plays a track via search. Mac B receives state and plays the same track in sync.
