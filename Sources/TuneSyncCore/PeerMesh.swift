@@ -115,6 +115,7 @@ public final class PeerMesh: @unchecked Sendable {
         startLivenessLoop()
         startPathMonitor()
         startWakeSleepObservers()
+        queue.async { [weak self] in self?.notifyChange() }
     }
 
     public func stop() {

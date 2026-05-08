@@ -66,7 +66,11 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
     ws.onopen = function () {
       status.textContent = 'connected';
       send({ kind: 'hello', senderId: senderId, displayName: navigator.userAgent.slice(0, 60), host: false });
-      setInterval(sendPing, 5000);
+      var fast = 0;
+      var fastTick = setInterval(function () {
+        sendPing();
+        if (++fast >= 5) { clearInterval(fastTick); setInterval(sendPing, 5000); }
+      }, 500);
     };
     ws.onmessage = function (ev) {
       try { handle(JSON.parse(ev.data)); } catch (e) { console.error(e); }
@@ -107,21 +111,37 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
     } else {
       player.unMute();
     }
+    function expectedT() {
+      var base = s.t || 0;
+      if (!s.playing) return base;
+      var hostNow = Date.now() - clockOffsetMs;
+      var elapsedMs = (typeof s.clientMs === 'number') ? (hostNow - s.clientMs) : 0;
+      if (elapsedMs < 0) elapsedMs = 0;
+      if (elapsedMs > 30000) elapsedMs = 0;
+      return base + elapsedMs / 1000;
+    }
     if (s.videoId && s.videoId !== lastVideoId) {
       lastVideoId = s.videoId;
-      player.loadVideoById(s.videoId, s.t || 0);
+      player.loadVideoById(s.videoId, expectedT());
       trackEl.textContent = s.videoId;
+      return;
     }
     var doApply = function () {
+      var target = expectedT();
       var current = player.getCurrentTime ? player.getCurrentTime() : 0;
-      var diff = current - (s.t || 0);
-      if (Math.abs(diff) > 0.5) {
-        player.seekTo(s.t, true);
-      } else if (Math.abs(diff) > 0.05) {
-        player.setPlaybackRate(diff > 0 ? 0.95 : 1.05);
-        setTimeout(function () { player.setPlaybackRate(1.0); }, 500);
+      var diff = current - target;
+      if (Math.abs(diff) > 0.6) {
+        player.seekTo(target, true);
+      } else if (diff < -0.1) {
+        player.setPlaybackRate(1.25);
+        setTimeout(function () { if (player.setPlaybackRate) player.setPlaybackRate(1.0); }, 600);
+      } else if (diff > 0.1) {
+        player.setPlaybackRate(0.9);
+        setTimeout(function () { if (player.setPlaybackRate) player.setPlaybackRate(1.0); }, 600);
       }
-      if (s.playing) player.playVideo(); else player.pauseVideo();
+      var st = player.getPlayerState ? player.getPlayerState() : -1;
+      if (s.playing && st !== 1 && st !== 3) player.playVideo();
+      else if (!s.playing && st === 1) player.pauseVideo();
     };
     if (typeof s.applyAtMs === 'number') {
       var localTarget = s.applyAtMs - clockOffsetMs;
@@ -134,7 +154,8 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
   window.onYouTubeIframeAPIReady = function () {
     player = new YT.Player('player', {
       width: '100%', height: '100%',
-      playerVars: { playsinline: 1, controls: 1 },
+      host: 'https://www.youtube-nocookie.com',
+      playerVars: { playsinline: 1, controls: 1, origin: window.location.origin, rel: 0 },
       events: {
         onReady: function () { connect(); }
       }
