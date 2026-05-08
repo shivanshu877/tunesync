@@ -191,6 +191,7 @@ final class MeshBridge: PeerMeshDelegate, @unchecked Sendable {
 public struct ContentView: View {
     @ObservedObject var rt: AppRuntime
     @State private var showSidebar: Bool = false
+    @State private var searchQuery: String = ""
 
     public init(rt: AppRuntime) {
         self.rt = rt
@@ -199,6 +200,8 @@ public struct ContentView: View {
     public var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
+                searchBar
+                Divider()
                 WebViewHost(player: rt.player)
                     .frame(minWidth: 800, minHeight: 600)
                 StatusBar(
@@ -225,5 +228,32 @@ public struct ContentView: View {
         }
         .onAppear { rt.start() }
         .onDisappear { rt.stop() }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+            TextField("Search YouTube Music…", text: $searchQuery, onCommit: submitSearch)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+            if !searchQuery.isEmpty {
+                Button(action: { searchQuery = "" }) {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    private func submitSearch() {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+        if let url = URL(string: "https://music.youtube.com/search?q=\(encoded)") {
+            rt.player.navigate(to: url)
+        }
     }
 }
