@@ -42,3 +42,43 @@ The unit tests cover the core sync engine, Lamport clock, frame codec, and messa
 
 - **Track-change on macOS Sonoma+ may briefly mute** — the WebView re-navigates when the videoId changes (we use `window.location.href` rather than YT's internal player API). Workaround: it autoplays after navigation; just wait ~1 s.
 - **YT Music DOM may shift selectors** — if peer count is right but no state syncs, YT updated their UI. Edit `Sources/TuneSync/Resources/injected.js` selectors.
+
+## Reliability scenarios (post 0.2.8)
+
+These require two Macs on the same Wi-Fi.
+
+### Wi-Fi reassociation
+
+1. Both Macs in same room. Verify peer list shows each other.
+2. On Mac B: turn Wi-Fi off, wait 5s, turn back on (same SSID).
+3. Within ~10s of reassociation, both peer lists should show the partner again.
+4. Diagnostics: `Restarts P:` should have incremented on Mac B.
+
+### Sleep / wake
+
+1. Both Macs connected.
+2. Sleep Mac B for 2 minutes.
+3. Wake Mac B.
+4. Within 10s, both peer lists should show each other. No app restart needed.
+
+### Room rename
+
+1. Mac A and B both in room `default`.
+2. Mac A renames room to `kitchen`.
+3. Mac B's connected list clears within 1–2s.
+4. Mac B renames to `kitchen`.
+5. Both reconnect within 5s. No ghost entries from `default`.
+
+### Kick + reconnect
+
+1. Mac A kicks Mac B.
+2. Mac B should drop from Mac A's connected list, appear in discovered.
+3. On Mac A, click "reconnect" for Mac B.
+4. Single connection re-established. No duplicate entry.
+
+### Liveness timeout
+
+1. Both connected.
+2. On Mac B: in Activity Monitor, force-kill TuneSync (don't quit gracefully — skip the bye).
+3. Mac A's peer list should drop Mac B within ~25s (no `bye` received, ping timeout fires).
+4. Diagnostics: `Ping timeouts` increments by 1.
