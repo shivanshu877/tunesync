@@ -8,6 +8,7 @@ public struct DiagSnapshot: Equatable, Sendable {
     public let playing: Bool?
     public let ad: Bool?
     public let skipped: String?
+    public let trackChange: Bool
     public let at: Date
 
     public var isLive: Bool { videoId != nil && skipped == nil }
@@ -42,6 +43,7 @@ public final class PlayerController: NSObject {
                 playing: dict["playing"] as? Bool,
                 ad: dict["ad"] as? Bool,
                 skipped: dict["skipped"] as? String,
+                trackChange: (dict["trackChange"] as? Bool) ?? false,
                 at: Date()
             )
             onDiag?(diag)

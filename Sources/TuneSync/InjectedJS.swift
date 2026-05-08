@@ -11,8 +11,14 @@ enum InjectedJS {
   // otherwise feed back into reportState and broadcast — peers would
   // bounce state back and forth. We mute reportState for COOLDOWN_MS
   // after any apply that actually changed something.
+  //
+  // BUT: a real user-initiated track change during the cooldown window
+  // must NOT be suppressed. We track lastAppliedVideoId and bypass the
+  // cooldown when the current videoId differs (= real new track).
   var COOLDOWN_MS = 1500;
   var lastAppliedAt = 0;
+  var lastAppliedVideoId = null;
+  var lastReportedVideoId = null;
 
   function post(payload) {
     try {
@@ -70,10 +76,6 @@ enum InjectedJS {
   }
 
   function isAdShowing() {
-    // Narrow signal: only the player bar's own "ad-showing" class. The earlier
-    // fallback (querySelector(".ad-showing, .ytp-ad-player-overlay")) matched
-    // hidden ad-related elements that exist even when no ad is actually
-    // playing, which permanently suppressed outbound state.
     var bar = document.querySelector("ytmusic-player-bar");
     return !!(bar && bar.classList.contains("ad-showing"));
   }
@@ -84,24 +86,28 @@ enum InjectedJS {
     return {
       videoId: getVideoId(),
       t: v.currentTime || 0,
-      // NOTE: deliberately not gated on readyState — during a seek the
-      // video element briefly drops to a lower readyState, which used to
-      // make us report "playing: false" mid-seek and pull peers into a
-      // pause/play flap. The simpler check is correct.
       playing: !v.paused && !v.ended,
       ad: isAdShowing(),
     };
   }
 
   function reportState() {
-    var why = null;
     var s = snapshot();
-    if (Date.now() - lastAppliedAt < COOLDOWN_MS) why = "cooldown";
-    else if (!s) why = "no-video";
-    else if (!s.videoId) why = "no-video-id";
 
-    // Always emit a diagnostic ping so the native side knows we're alive
-    // and can show what was/wasn't broadcast.
+    // Real track change = videoId differs from the last one we either
+    // applied (from a remote peer) OR the last one we reported. This
+    // bypasses the cooldown — a user-initiated track switch is never
+    // an echo, so it must propagate even if we just applied something.
+    var isTrackChange = !!(s && s.videoId
+                           && s.videoId !== lastAppliedVideoId
+                           && s.videoId !== lastReportedVideoId);
+
+    var why = null;
+    if (!s) why = "no-video";
+    else if (!s.videoId) why = "no-video-id";
+    else if (!isTrackChange && Date.now() - lastAppliedAt < COOLDOWN_MS) why = "cooldown";
+
+    // Diagnostic ping always — so the native panel knows what's happening.
     post({
       kind: "diag",
       videoId: s ? s.videoId : null,
@@ -109,11 +115,13 @@ enum InjectedJS {
       playing: s ? s.playing : null,
       ad: s ? s.ad : null,
       skipped: why,
+      trackChange: isTrackChange,
       at: Date.now(),
     });
 
     if (why) return;
     post({ kind: "state", videoId: s.videoId, t: s.t, playing: s.playing, ad: s.ad });
+    lastReportedVideoId = s.videoId;
   }
 
   var hooked = null;
@@ -121,7 +129,11 @@ enum InjectedJS {
     var v = getVideo();
     if (!v || v === hooked) return;
     hooked = v;
-    ["play", "pause", "seeked", "loadedmetadata", "ratechange", "ended"].forEach(function (ev) {
+    // Added durationchange + emptied + loadstart so we catch the new <video>
+    // metadata event the moment YT Music swaps the source for a new track,
+    // not a second later when the polling loop next runs.
+    ["play", "pause", "seeked", "loadedmetadata", "durationchange",
+     "emptied", "loadstart", "ratechange", "ended"].forEach(function (ev) {
       v.addEventListener(ev, function () { reportState(); });
     });
   }
@@ -133,8 +145,12 @@ enum InjectedJS {
     var changed = false;
 
     if (videoId && videoId !== current) {
-      var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
+      // Set lastApplied BEFORE navigating — the page reload re-runs this
+      // script, but lastAppliedVideoId is module-scope and gets reset.
+      // We restamp it post-navigation via the URL search param fallback.
       lastAppliedAt = Date.now();
+      lastAppliedVideoId = videoId;
+      var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
       window.location.href = dest;
       return true;
     }
@@ -147,6 +163,7 @@ enum InjectedJS {
 
     if (changed) {
       lastAppliedAt = Date.now();
+      lastAppliedVideoId = videoId || current;
     }
     return true;
   };
@@ -156,12 +173,24 @@ enum InjectedJS {
   setInterval(hookVideo, 1000);
   hookVideo();
 
-  // Periodic catch-up: if no event-driven state has fired (e.g., user is
-  // letting a song play untouched), this gets the latest playhead out
-  // every 5s. The cooldown guard inside reportState() still applies.
+  // Aggressive videoId polling: catches track changes that don't fire any
+  // of the hooked <video> events (e.g., YT Music re-creates the element
+  // and our listeners are gone before we re-hook). 500ms cadence balances
+  // responsiveness vs CPU.
+  var pollLastSeen = null;
+  setInterval(function () {
+    var s = snapshot();
+    if (!s || !s.videoId) return;
+    if (s.videoId !== pollLastSeen) {
+      pollLastSeen = s.videoId;
+      reportState();
+    }
+  }, 500);
+
+  // Periodic catch-up for slow drifts (e.g., user lets a song play untouched).
   setInterval(reportState, 5000);
 
-  console.info("[tunesync] injected");
+  console.info("[tunesync] injected (v0.2.8)");
 })();
 """#
 }
