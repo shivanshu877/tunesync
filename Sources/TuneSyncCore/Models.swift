@@ -24,12 +24,16 @@ public struct StateMessage: Codable, Equatable, Sendable {
     public let playing: Bool
     /// Sender's wall-clock (ms since epoch) when the message was encoded.
     public let clientMs: Int64?
-    /// True if the sender is currently claiming the host role. Used so
-    /// receivers know which peer to treat as the authoritative heartbeat
-    /// source. Optional for backwards compat.
+    /// True if the sender is currently claiming the host role.
     public let host: Bool?
+    /// Sender's wallclock target time when this state should take effect.
+    public let applyAtMs: Int64?
+    /// True if the host is currently in an ad — guests should mute and pause.
+    public let adOnHost: Bool?
 
-    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool, clientMs: Int64? = nil, host: Bool? = nil) {
+    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool,
+                clientMs: Int64? = nil, host: Bool? = nil,
+                applyAtMs: Int64? = nil, adOnHost: Bool? = nil) {
         self.senderId = senderId
         self.ts = ts
         self.videoId = videoId
@@ -37,6 +41,8 @@ public struct StateMessage: Codable, Equatable, Sendable {
         self.playing = playing
         self.clientMs = clientMs
         self.host = host
+        self.applyAtMs = applyAtMs
+        self.adOnHost = adOnHost
     }
 }
 
@@ -63,20 +69,32 @@ public struct ByeMessage: Codable, Equatable, Sendable {
 public struct PingMessage: Codable, Equatable, Sendable {
     public let senderId: String
     public let nonce: Int64
+    /// Sender wallclock (ms) when this ping was encoded.
+    public let t0: Int64
 
-    public init(senderId: String, nonce: Int64) {
+    public init(senderId: String, nonce: Int64, t0: Int64 = 0) {
         self.senderId = senderId
         self.nonce = nonce
+        self.t0 = t0
     }
 }
 
 public struct PongMessage: Codable, Equatable, Sendable {
     public let senderId: String
     public let nonce: Int64
+    /// Echoed from the originating ping.
+    public let t0: Int64
+    /// Receiver wallclock (ms) at receive.
+    public let t1: Int64
+    /// Receiver wallclock (ms) at send.
+    public let t2: Int64
 
-    public init(senderId: String, nonce: Int64) {
+    public init(senderId: String, nonce: Int64, t0: Int64 = 0, t1: Int64 = 0, t2: Int64 = 0) {
         self.senderId = senderId
         self.nonce = nonce
+        self.t0 = t0
+        self.t1 = t1
+        self.t2 = t2
     }
 }
 
