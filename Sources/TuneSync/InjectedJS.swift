@@ -138,16 +138,22 @@ enum InjectedJS {
     });
   }
 
-  window.tunesyncApplyState = function (videoId, t, playing) {
+  // Pending scheduled-play timer handle, so we can cancel it if a newer
+  // state supersedes (e.g., user pauses before the scheduled play fires).
+  var pendingPlayTimeout = null;
+  function cancelPending() {
+    if (pendingPlayTimeout !== null) {
+      clearTimeout(pendingPlayTimeout);
+      pendingPlayTimeout = null;
+    }
+  }
+
+  window.tunesyncApplyState = function (videoId, t, playing, startAtMs) {
     var v = getVideo();
     if (!v) return false;
     var current = getVideoId();
-    var changed = false;
 
     if (videoId && videoId !== current) {
-      // Set lastApplied BEFORE navigating — the page reload re-runs this
-      // script, but lastAppliedVideoId is module-scope and gets reset.
-      // We restamp it post-navigation via the URL search param fallback.
       lastAppliedAt = Date.now();
       lastAppliedVideoId = videoId;
       var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
@@ -156,15 +162,34 @@ enum InjectedJS {
     }
 
     if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 1.0) {
-      try { v.currentTime = t; changed = true; } catch (e) {}
+      try { v.currentTime = t; } catch (e) {}
     }
-    if (playing && v.paused) { v.play().catch(function () {}); changed = true; }
-    if (!playing && !v.paused) { v.pause(); changed = true; }
 
-    if (changed) {
-      lastAppliedAt = Date.now();
-      lastAppliedVideoId = videoId || current;
+    cancelPending();
+
+    if (playing) {
+      var delay = (typeof startAtMs === "number") ? (startAtMs - Date.now()) : 0;
+      if (delay > 0) {
+        // Scheduled play: pre-pause now (so we don't "play through" the
+        // wait window), then arm the timer. All peers do this in
+        // lockstep; both fire v.play() at the same wall-clock instant.
+        try { if (!v.paused) v.pause(); } catch (e) {}
+        pendingPlayTimeout = setTimeout(function () {
+          pendingPlayTimeout = null;
+          var vv = getVideo();
+          if (vv && vv.paused) { vv.play().catch(function () {}); }
+        }, delay);
+      } else {
+        // Either no schedule, or schedule already in the past — play now.
+        if (v.paused) { v.play().catch(function () {}); }
+      }
+    } else {
+      // Pause is always immediate.
+      if (!v.paused) v.pause();
     }
+
+    lastAppliedAt = Date.now();
+    lastAppliedVideoId = videoId || current;
     return true;
   };
 

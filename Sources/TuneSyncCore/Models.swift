@@ -24,12 +24,17 @@ public struct StateMessage: Codable, Equatable, Sendable {
     public let playing: Bool
     /// Sender's wall-clock (ms since epoch) when the message was encoded.
     public let clientMs: Int64?
-    /// True if the sender is currently claiming the host role. Used so
-    /// receivers know which peer to treat as the authoritative heartbeat
-    /// source. Optional for backwards compat.
+    /// True if the sender is currently claiming the host role.
     public let host: Bool?
+    /// Wall-clock (ms since epoch) at which all peers should trigger
+    /// playback. Used for scheduled "play at the same instant" sync —
+    /// when present, the receiver pauses locally, seeks to `t`, and
+    /// schedules `v.play()` to fire exactly at `startAtMs`. Set only on
+    /// transitions to playing (and track changes); heartbeats and pauses
+    /// leave it nil. Optional for backwards-compat.
+    public let startAtMs: Int64?
 
-    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool, clientMs: Int64? = nil, host: Bool? = nil) {
+    public init(senderId: String, ts: Int64, videoId: String, t: Double, playing: Bool, clientMs: Int64? = nil, host: Bool? = nil, startAtMs: Int64? = nil) {
         self.senderId = senderId
         self.ts = ts
         self.videoId = videoId
@@ -37,6 +42,7 @@ public struct StateMessage: Codable, Equatable, Sendable {
         self.playing = playing
         self.clientMs = clientMs
         self.host = host
+        self.startAtMs = startAtMs
     }
 }
 
@@ -64,6 +70,11 @@ public enum SyncMessage: Codable, Equatable, Sendable {
     case state(StateMessage)
     case hello(HelloMessage)
     case bye(ByeMessage)
+
+    public func stateOrNil() -> StateMessage? {
+        if case .state(let s) = self { return s }
+        return nil
+    }
 
     private enum Kind: String, Codable {
         case state, hello, bye

@@ -6,6 +6,7 @@ final class SyncEngineTests: XCTestCase {
     final class Recorder {
         var broadcasts: [SyncMessage] = []
         var applies: [PlayerState] = []
+        var appliesScheduledAt: [Int64?] = []
     }
 
     private func makeEngine(
@@ -15,7 +16,10 @@ final class SyncEngineTests: XCTestCase {
         return SyncEngine(
             senderId: senderId,
             broadcast: { recorder.broadcasts.append($0) },
-            applyState: { recorder.applies.append($0) }
+            applyState: { state, startAtMs in
+                recorder.applies.append(state)
+                recorder.appliesScheduledAt.append(startAtMs)
+            }
         )
     }
 
@@ -219,6 +223,87 @@ final class SyncEngineTests: XCTestCase {
         // 100ms net + 250ms apply = ~350ms total
         XCTAssertEqual(r.applies[0].t, 10.35, accuracy: 0.10)
     }
+
+    // MARK: - Scheduled play
+
+    func testLocalPlayBroadcastIncludesStartAtMs() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let before = Int64(Date().timeIntervalSince1970 * 1000)
+        e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: true))
+        e.flushDebounceForTesting()
+        guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
+        XCTAssertNotNil(s.startAtMs)
+        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 200)  // ~250ms buffer
+        XCTAssertLessThanOrEqual(s.startAtMs!, before + 600)
+    }
+
+    func testLocalPauseBroadcastNoStartAtMs() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        e.localStateChanged(PlayerState(videoId: "v", t: 5, playing: false))
+        e.flushDebounceForTesting()
+        guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
+        XCTAssertNil(s.startAtMs, "pauses should propagate immediately, no schedule")
+    }
+
+    func testHostHeartbeatNoStartAtMs() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        e.role = .host
+        e.localStateChanged(PlayerState(videoId: "v", t: 5, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.broadcasts.count, 1)
+        XCTAssertNotNil(r.broadcasts[0].stateOrNil()?.startAtMs, "user-driven play scheduled")
+
+        e.heartbeatTickForTesting()
+        XCTAssertEqual(r.broadcasts.count, 2)
+        XCTAssertNil(r.broadcasts[1].stateOrNil()?.startAtMs, "heartbeat is steady-state, never scheduled")
+    }
+
+    func testRemoteScheduledPlayIsForwardedToApply() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let scheduledAt = nowMs + 500
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs - 100,
+            startAtMs: scheduledAt
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertEqual(r.appliesScheduledAt[0], scheduledAt, "scheduled time forwarded to apply layer")
+        // Latency comp NOT applied — schedule handles cross-Mac alignment
+        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+    }
+
+    func testRemoteUnscheduledPlayStillUsesLatencyComp() {
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs - 100   // 100ms ago
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertNil(r.appliesScheduledAt[0], "no schedule when message has no startAtMs")
+        XCTAssertEqual(r.applies[0].t, 10.35, accuracy: 0.10, "100ms net + 250ms apply overhead")
+    }
+
+    func testLocalPlayAppliesItselfWithSchedule() {
+        // The host's own click-play should also wait for the schedule
+        // window so the host doesn't play 250ms ahead of every guest.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertNotNil(r.appliesScheduledAt[0], "local play scheduled too")
+    }
+
+    // MARK: - Latency comp regression tests
 
     func testLatencyCompensationOnZeroNetworkAddsApplyOverhead() {
         // Even when network elapsed is 0 (best case), receiver should still

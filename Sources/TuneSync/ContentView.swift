@@ -36,14 +36,14 @@ public final class AppRuntime: ObservableObject {
         let engine = SyncEngine(
             senderId: id,
             broadcast: { [weak mesh] msg in mesh?.broadcast(msg) },
-            applyState: { _ in }
+            applyState: { _, _ in }
         )
 
         self.engine = engine
         self.mesh = mesh
 
-        self.engine.applyStateOverride { [weak self] state in
-            DispatchQueue.main.async { self?.player.applyState(state) }
+        self.engine.applyStateOverride { [weak self] state, startAtMs in
+            DispatchQueue.main.async { self?.player.applyState(state, startAtMs: startAtMs) }
         }
 
         self.player.onLocalState = { [weak self] state in
