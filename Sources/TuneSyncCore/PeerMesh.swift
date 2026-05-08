@@ -78,6 +78,14 @@ public final class PeerMesh: @unchecked Sendable {
     private var pingTimeoutCount: Int = 0
     private var nonceCounter: Int64 = 0
 
+    private var listenerRestartAttempt: Int = 0
+    private var browserRestartAttempt: Int = 0
+    private var listenerRestartCount: Int = 0
+    private var browserRestartCount: Int = 0
+    private var lastListenerState: String = "—"
+    private var lastBrowserState: String = "—"
+    private var stopping: Bool = false
+
     public init(
         senderId: String,
         displayName: String,
@@ -97,6 +105,7 @@ public final class PeerMesh: @unchecked Sendable {
     }
 
     public func stop() {
+        stopping = true
         livenessTimer?.cancel()
         livenessTimer = nil
         listener?.cancel()
@@ -139,8 +148,10 @@ public final class PeerMesh: @unchecked Sendable {
             pendingParsers.removeAll()
             discovered.removeAll()
             kicked.removeAll()
+            stopping = true
             listener?.cancel()
             browser?.cancel()
+            stopping = false
             startListener()
             startBrowser()
             notifyChange()
@@ -190,8 +201,22 @@ public final class PeerMesh: @unchecked Sendable {
             listener.newConnectionHandler = { [weak self] conn in
                 self?.acceptIncoming(conn)
             }
-            listener.stateUpdateHandler = { state in
-                Log.mesh.info("listener state \(String(describing: state), privacy: .public)")
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                self.queue.async {
+                    self.lastListenerState = String(describing: state)
+                    Log.mesh.info("listener state \(String(describing: state), privacy: .public)")
+                    switch state {
+                    case .ready:
+                        self.listenerRestartAttempt = 0
+                    case .failed:
+                        self.scheduleListenerRestart()
+                    case .cancelled:
+                        if !self.stopping { self.scheduleListenerRestart() }
+                    default:
+                        break
+                    }
+                }
             }
             listener.start(queue: queue)
             self.listener = listener
@@ -217,11 +242,48 @@ public final class PeerMesh: @unchecked Sendable {
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             self?.handleBrowse(results)
         }
-        browser.stateUpdateHandler = { state in
-            Log.mesh.info("browser state \(String(describing: state), privacy: .public)")
+        browser.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            self.queue.async {
+                self.lastBrowserState = String(describing: state)
+                Log.mesh.info("browser state \(String(describing: state), privacy: .public)")
+                switch state {
+                case .ready:
+                    self.browserRestartAttempt = 0
+                case .failed:
+                    self.scheduleBrowserRestart()
+                case .cancelled:
+                    if !self.stopping { self.scheduleBrowserRestart() }
+                default:
+                    break
+                }
+            }
         }
         browser.start(queue: queue)
         self.browser = browser
+    }
+
+    private func scheduleListenerRestart() {
+        let delay = MeshPolicy.restartBackoff(attempt: listenerRestartAttempt)
+        listenerRestartAttempt += 1
+        listenerRestartCount += 1
+        Log.mesh.info("scheduling listener restart in \(delay, privacy: .public)s (attempt \(self.listenerRestartAttempt, privacy: .public))")
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.listener?.cancel()
+            self.startListener()
+        }
+    }
+
+    private func scheduleBrowserRestart() {
+        let delay = MeshPolicy.restartBackoff(attempt: browserRestartAttempt)
+        browserRestartAttempt += 1
+        browserRestartCount += 1
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.browser?.cancel()
+            self.startBrowser()
+        }
     }
 
     private func handleBrowse(_ results: Set<NWBrowser.Result>) {
