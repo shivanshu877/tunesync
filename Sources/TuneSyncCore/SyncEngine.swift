@@ -41,6 +41,9 @@ public final class SyncEngine: @unchecked Sendable {
     /// propagate — guests just don't keep reasserting their position).
     public var role: Role = .unset
 
+    public var peerOffsetLookup: ((String) -> Int?)? = nil
+    public var applyStateExtended: ((PlayerState, Int64?, Bool) -> Void)? = nil
+
     public var adShowing: Bool = false {
         didSet {
             if adShowing != oldValue {
@@ -74,6 +77,7 @@ public final class SyncEngine: @unchecked Sendable {
     private let debounceMs: Int
     private let suppressionMs: Int
     private let heartbeatSeconds: Int
+    private let applyLeadMs: Int
 
     public init(
         senderId: String,
@@ -81,7 +85,8 @@ public final class SyncEngine: @unchecked Sendable {
         applyState: @escaping (PlayerState) -> Void,
         debounceMs: Int = 200,
         suppressionMs: Int = 1500,
-        heartbeatSeconds: Int = 3
+        heartbeatSeconds: Int = 3,
+        applyLeadMs: Int = 300
     ) {
         self.senderId = senderId
         self.broadcast = broadcast
@@ -89,6 +94,7 @@ public final class SyncEngine: @unchecked Sendable {
         self.debounceMs = debounceMs
         self.suppressionMs = suppressionMs
         self.heartbeatSeconds = heartbeatSeconds
+        self.applyLeadMs = applyLeadMs
     }
 
     public func applyStateOverride(_ apply: @escaping (PlayerState) -> Void) {
@@ -145,22 +151,33 @@ public final class SyncEngine: @unchecked Sendable {
             lastApplied = key
             suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
 
-            // Latency compensation: if peer is playing, advance `t` by however
-            // long the message took to reach us. Capped at 800ms — typical LAN
-            // RTT is <20ms; anything beyond ~800ms is more likely to be Mac
-            // clock skew than real network delay.
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             var effectiveT = s.t
             var compNote: String? = nil
-            if s.playing, let cms = s.clientMs {
-                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-                let elapsedMs = nowMs - cms
-                if elapsedMs > 0 && elapsedMs < 800 {
-                    effectiveT += Double(elapsedMs) / 1000.0
-                    compNote = "+\(elapsedMs)ms latency comp"
+            let offsetMs = peerOffsetLookup?(s.senderId) ?? 0
+
+            if let applyAt = s.applyAtMs {
+                let localTargetMs = applyAt - Int64(offsetMs)
+                let waitMs = localTargetMs - nowMs
+                if s.playing {
+                    effectiveT += Double(max(0, waitMs)) / 1000.0
+                }
+                compNote = "applyAt+\(waitMs)ms (offset:\(offsetMs))"
+            } else if s.playing, let cms = s.clientMs {
+                let elapsed = nowMs - cms - Int64(offsetMs)
+                if elapsed > 0 && elapsed < 800 {
+                    effectiveT += Double(elapsed) / 1000.0
+                    compNote = "+\(elapsed)ms latency comp"
                 }
             }
 
-            applyStateImpl(PlayerState(videoId: s.videoId, t: effectiveT, playing: s.playing))
+            let resolved = PlayerState(videoId: s.videoId, t: effectiveT, playing: s.playing)
+            let localTargetMs: Int64? = s.applyAtMs.map { $0 - Int64(offsetMs) }
+            if let ext = applyStateExtended {
+                ext(resolved, localTargetMs, s.adOnHost ?? false)
+            } else {
+                applyStateImpl(resolved)
+            }
             appendHistory(SyncEntry(
                 direction: .applied, senderId: s.senderId,
                 videoId: s.videoId, t: effectiveT, playing: s.playing,
@@ -221,7 +238,9 @@ public final class SyncEngine: @unchecked Sendable {
             senderId: senderId, ts: ts,
             videoId: s.videoId, t: s.t, playing: s.playing,
             clientMs: nowMs,
-            host: role == .host
+            host: role == .host,
+            applyAtMs: nowMs + Int64(applyLeadMs),
+            adOnHost: adShowing && role == .host
         ))
     }
 
