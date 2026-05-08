@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Network
 
@@ -86,6 +87,15 @@ public final class PeerMesh: @unchecked Sendable {
     private var lastBrowserState: String = "—"
     private var stopping: Bool = false
 
+    private var pathMonitor: NWPathMonitor?
+    private var lastPath: NWPath?
+    private var pathRestartCount: Int = 0
+    private var lastPathStatus: String = "—"
+    private var lastPathInterface: String? = nil
+    private var unsatisfiedSince: Date? = nil
+    private var wakeObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
+
     public init(
         senderId: String,
         displayName: String,
@@ -102,12 +112,20 @@ public final class PeerMesh: @unchecked Sendable {
         startListener()
         startBrowser()
         startLivenessLoop()
+        startPathMonitor()
+        startWakeSleepObservers()
     }
 
     public func stop() {
         stopping = true
         livenessTimer?.cancel()
         livenessTimer = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        if let w = wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(w) }
+        if let s = sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(s) }
+        wakeObserver = nil
+        sleepObserver = nil
         listener?.cancel()
         browser?.cancel()
         for (_, p) in peers { p.connection.cancel() }
@@ -571,6 +589,79 @@ public final class PeerMesh: @unchecked Sendable {
 
         let snap = (connected, disc, room)
         delegate?.peerMesh(self, peersChanged: snap.0, discovered: snap.1, room: snap.2)
+    }
+
+    private func startPathMonitor() {
+        let m = NWPathMonitor()
+        m.pathUpdateHandler = { [weak self] path in
+            self?.queue.async { self?.handlePathUpdate(path) }
+        }
+        m.start(queue: queue)
+        pathMonitor = m
+    }
+
+    private func handlePathUpdate(_ path: NWPath) {
+        lastPathStatus = String(describing: path.status)
+        lastPathInterface = path.availableInterfaces.first.map { "\($0.type)" }
+
+        switch path.status {
+        case .satisfied:
+            if unsatisfiedSince != nil {
+                unsatisfiedSince = nil
+                Log.mesh.info("path recovered — restarting mesh")
+                fullMeshRestart(reason: "path-recovered")
+            }
+            if let last = lastPath, last.availableInterfaces != path.availableInterfaces {
+                fullMeshRestart(reason: "interface-changed")
+            }
+        case .unsatisfied:
+            if unsatisfiedSince == nil {
+                unsatisfiedSince = Date()
+            }
+        default:
+            break
+        }
+        lastPath = path
+    }
+
+    private func fullMeshRestart(reason: String) {
+        pathRestartCount += 1
+        Log.mesh.info("full mesh restart (\(reason, privacy: .public))")
+        stopping = true
+        listener?.cancel()
+        browser?.cancel()
+        for (_, p) in peers { p.connection.cancel() }
+        peers.removeAll()
+        for (_, c) in pendingByEndpoint { c.cancel() }
+        pendingByEndpoint.removeAll()
+        pendingParsers.removeAll()
+        discovered.removeAll()
+        queue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+            guard let self else { return }
+            self.stopping = false
+            self.startListener()
+            self.startBrowser()
+            self.notifyChange()
+        }
+    }
+
+    private func startWakeSleepObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+        wakeObserver = nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.queue.async { self?.fullMeshRestart(reason: "wake") }
+        }
+        sleepObserver = nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                let bye = SyncMessage.bye(ByeMessage(senderId: self.senderId))
+                if let data = try? JSONEncoder().encode(bye) {
+                    let frame = FrameCodec.encode(data)
+                    for (_, p) in self.peers {
+                        p.connection.send(content: frame, completion: .contentProcessed { _ in })
+                    }
+                }
+            }
+        }
     }
 
     /// Re-broadcasts hello to every connected peer. Call after toggling
