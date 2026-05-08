@@ -189,9 +189,10 @@ public struct ConnectionManagerView: View {
             diagRow("Restarts", "L:\(d.listenerRestarts) B:\(d.browserRestarts) P:\(d.pathRestarts)")
             diagRow("Ping timeouts", "\(d.pingTimeouts)")
             ForEach(d.peers, id: \.senderId) { p in
-                let rtt = p.lastPongMs.map { "\($0)ms" } ?? "—"
+                let rtt = p.rttMs > 0 ? "\(p.rttMs)ms" : (p.lastPongMs.map { "\($0)ms" } ?? "—")
+                let off = "\(p.offsetMs)ms"
                 let dur = Int(p.connDurationS)
-                diagRow(String(p.senderId.prefix(8)), "rtt:\(rtt) up:\(dur)s")
+                diagRow(String(p.senderId.prefix(8)), "rtt:\(rtt) off:\(off) up:\(dur)s")
             }
 
             // My current state

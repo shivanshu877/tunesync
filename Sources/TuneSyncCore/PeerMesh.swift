@@ -161,7 +161,9 @@ public final class PeerMesh: @unchecked Sendable {
                     senderId: p.id,
                     lastSeen: p.lastSeen,
                     lastPongMs: p.lastPongMs,
-                    connDurationS: now.timeIntervalSince(p.connectedAt)
+                    connDurationS: now.timeIntervalSince(p.connectedAt),
+                    offsetMs: p.clockSync.estimatedOffsetMs(),
+                    rttMs: p.clockSync.estimatedRttMs()
                 )
             }.sorted { $0.senderId < $1.senderId }
             return MeshDiagnostics(

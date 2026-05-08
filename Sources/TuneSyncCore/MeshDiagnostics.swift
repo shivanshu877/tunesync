@@ -5,12 +5,16 @@ public struct PeerLiveness: Equatable, Sendable {
     public let lastSeen: Date
     public let lastPongMs: Int?
     public let connDurationS: TimeInterval
+    public let offsetMs: Int
+    public let rttMs: Int
 
-    public init(senderId: String, lastSeen: Date, lastPongMs: Int?, connDurationS: TimeInterval) {
+    public init(senderId: String, lastSeen: Date, lastPongMs: Int?, connDurationS: TimeInterval, offsetMs: Int = 0, rttMs: Int = 0) {
         self.senderId = senderId
         self.lastSeen = lastSeen
         self.lastPongMs = lastPongMs
         self.connDurationS = connDurationS
+        self.offsetMs = offsetMs
+        self.rttMs = rttMs
     }
 }
 
