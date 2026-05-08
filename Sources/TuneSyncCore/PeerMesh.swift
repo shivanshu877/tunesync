@@ -36,6 +36,11 @@ public final class PeerMesh: @unchecked Sendable {
         let connectedAt: Date
         var parser = FrameParser()
         var isHost: Bool = false
+        var lastSeen: Date = Date()
+        var lastPingSent: Date = .distantPast
+        var lastPongMs: Int? = nil
+        var lastPingNonce: Int64? = nil
+        var lastPingAt: Date? = nil
     }
 
     private struct Discovered: Equatable {
@@ -69,6 +74,10 @@ public final class PeerMesh: @unchecked Sendable {
 
     private var room: String
 
+    private var livenessTimer: DispatchSourceTimer?
+    private var pingTimeoutCount: Int = 0
+    private var nonceCounter: Int64 = 0
+
     public init(
         senderId: String,
         displayName: String,
@@ -84,9 +93,12 @@ public final class PeerMesh: @unchecked Sendable {
     public func start() {
         startListener()
         startBrowser()
+        startLivenessLoop()
     }
 
     public func stop() {
+        livenessTimer?.cancel()
+        livenessTimer = nil
         listener?.cancel()
         browser?.cancel()
         for (_, p) in peers { p.connection.cancel() }
@@ -322,6 +334,7 @@ public final class PeerMesh: @unchecked Sendable {
 
         if let id = existingPeerId {
             peers[id]?.parser = parser
+            peers[id]?.lastSeen = Date()
         } else {
             pendingParsers[endpoint] = parser
         }
@@ -380,8 +393,23 @@ public final class PeerMesh: @unchecked Sendable {
                     delegate?.peerMesh(self, received: msg, from: id)
                     removePeer(id: id)
                 }
-            case .ping, .pong:
-                break
+            case .ping(let p):
+                guard let id = existingPeerId ?? peerId(forEndpoint: endpoint) else { continue }
+                let reply = SyncMessage.pong(PongMessage(senderId: senderId, nonce: p.nonce))
+                if let data = try? JSONEncoder().encode(reply) {
+                    let frame = FrameCodec.encode(data)
+                    peers[id]?.connection.send(content: frame, completion: .contentProcessed { _ in })
+                }
+            case .pong(let p):
+                guard let id = existingPeerId ?? peerId(forEndpoint: endpoint),
+                      var pc = peers[id],
+                      let nonce = pc.lastPingNonce, nonce == p.nonce,
+                      let sentAt = pc.lastPingAt else { continue }
+                let rttMs = Int(Date().timeIntervalSince(sentAt) * 1000)
+                pc.lastPongMs = rttMs
+                pc.lastPingNonce = nil
+                pc.lastPingAt = nil
+                peers[id] = pc
             }
         }
     }
@@ -416,6 +444,50 @@ public final class PeerMesh: @unchecked Sendable {
     private func removePending(_ conn: NWConnection) {
         pendingByEndpoint.removeValue(forKey: conn.endpoint)
         pendingParsers.removeValue(forKey: conn.endpoint)
+    }
+
+    private func startLivenessLoop() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + .seconds(5), repeating: .seconds(5))
+        t.setEventHandler { [weak self] in self?.tickLiveness() }
+        t.resume()
+        livenessTimer = t
+    }
+
+    private func tickLiveness() {
+        let now = Date()
+        var toDrop: [String] = []
+        for (id, var pc) in peers {
+            let action = MeshPolicy.livenessAction(
+                now: now,
+                lastSeen: pc.lastSeen,
+                lastPingSent: pc.lastPingSent,
+                pingIntervalS: 10,
+                deadAfterS: 25
+            )
+            switch action {
+            case .idle:
+                break
+            case .sendPing:
+                nonceCounter &+= 1
+                pc.lastPingSent = now
+                pc.lastPingAt = now
+                pc.lastPingNonce = nonceCounter
+                peers[id] = pc
+                let msg = SyncMessage.ping(PingMessage(senderId: senderId, nonce: nonceCounter))
+                if let data = try? JSONEncoder().encode(msg) {
+                    pc.connection.send(content: FrameCodec.encode(data), completion: .contentProcessed { _ in })
+                }
+            case .dropDead:
+                pingTimeoutCount += 1
+                toDrop.append(id)
+            }
+        }
+        for id in toDrop {
+            if let pc = peers[id] { pc.connection.cancel() }
+            Log.mesh.info("dropping silent peer \(id, privacy: .public)")
+            removePeer(id: id)
+        }
     }
 
     private func removePeer(id: String) {
