@@ -13,6 +13,7 @@ public final class AppRuntime: ObservableObject {
     @Published public var lastLocalState: PlayerState?
     @Published public var syncHistory: [SyncEntry] = []
     @Published public var role: Role = .unset
+    @Published public var meshDiagnostics: MeshDiagnostics = .empty
 
     public var peerCount: Int { connectedPeers.count }
     public var senderId: String { engine.senderId }
@@ -27,6 +28,7 @@ public final class AppRuntime: ObservableObject {
     public let updater = Updater()
 
     private var bridge: MeshBridge?
+    private var diagPollTimer: Timer?
 
     public init() {
         let id = UUID().uuidString
@@ -68,9 +70,19 @@ public final class AppRuntime: ObservableObject {
         self.mesh.delegate = bridge
     }
 
+    public func startDiagPolling() {
+        diagPollTimer?.invalidate()
+        diagPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let snap = self.mesh.currentDiagnostics()
+            DispatchQueue.main.async { self.meshDiagnostics = snap }
+        }
+    }
+
     public func start() {
         engine.start()
         mesh.start()
+        startDiagPolling()
         updater.startPeriodicChecks()
     }
 

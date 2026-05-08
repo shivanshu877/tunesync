@@ -152,6 +152,31 @@ public final class PeerMesh: @unchecked Sendable {
         get { queue.sync { room } }
     }
 
+    public func currentDiagnostics() -> MeshDiagnostics {
+        return queue.sync {
+            let now = Date()
+            let peerLiveness: [PeerLiveness] = peers.values.map { p in
+                PeerLiveness(
+                    senderId: p.id,
+                    lastSeen: p.lastSeen,
+                    lastPongMs: p.lastPongMs,
+                    connDurationS: now.timeIntervalSince(p.connectedAt)
+                )
+            }.sorted { $0.senderId < $1.senderId }
+            return MeshDiagnostics(
+                listenerState: lastListenerState,
+                browserState: lastBrowserState,
+                pathStatus: lastPathStatus,
+                interface: lastPathInterface,
+                listenerRestarts: listenerRestartCount,
+                browserRestarts: browserRestartCount,
+                pathRestarts: pathRestartCount,
+                pingTimeouts: pingTimeoutCount,
+                peers: peerLiveness
+            )
+        }
+    }
+
     public func setRoom(_ name: String) {
         queue.async { [self] in
             let trimmed = name.trimmingCharacters(in: .whitespaces)
