@@ -14,6 +14,7 @@ public final class AppRuntime: ObservableObject {
     @Published public var syncHistory: [SyncEntry] = []
     @Published public var role: Role = .unset
     @Published public var meshDiagnostics: MeshDiagnostics = .empty
+    @Published public var bridgedClientCount: Int = 0
 
     public var peerCount: Int { connectedPeers.count }
     public var senderId: String { engine.senderId }
@@ -27,7 +28,13 @@ public final class AppRuntime: ObservableObject {
     public let mesh: PeerMesh
     public let updater = Updater()
 
-    private var bridge: MeshBridge?
+    private var meshBridge: MeshBridge?
+    private let webBridgeBox = WebBridgeBox()
+    private var webBridge: Bridge? {
+        get { webBridgeBox.bridge }
+        set { webBridgeBox.bridge = newValue }
+    }
+    private var bridgeRelay: BridgeRelay?
     private var diagPollTimer: Timer?
 
     public init() {
@@ -35,9 +42,15 @@ public final class AppRuntime: ObservableObject {
         let name = Host.current().localizedName ?? "Mac"
 
         let mesh = PeerMesh(senderId: id, displayName: name, room: "default")
+        // Capture webBridgeBox (already allocated) so the closure can reach webBridge
+        // before `self` is fully initialised.
+        let webBridgeBox = self.webBridgeBox
         let engine = SyncEngine(
             senderId: id,
-            broadcast: { [weak mesh] msg in mesh?.broadcast(msg) },
+            broadcast: { [weak mesh] msg in
+                mesh?.broadcast(msg)
+                webBridgeBox.bridge?.broadcastToClients(msg)
+            },
             applyState: { _ in }
         )
 
@@ -71,9 +84,9 @@ public final class AppRuntime: ObservableObject {
             DispatchQueue.main.async { self.syncHistory = snap }
         }
 
-        let bridge = MeshBridge(owner: self)
-        self.bridge = bridge
-        self.mesh.delegate = bridge
+        let meshBridge = MeshBridge(owner: self)
+        self.meshBridge = meshBridge
+        self.mesh.delegate = meshBridge
     }
 
     public func startDiagPolling() {
@@ -95,11 +108,16 @@ public final class AppRuntime: ObservableObject {
     public func stop() {
         engine.stop()
         mesh.stop()
+        webBridge?.stop()
+        webBridge = nil
         updater.stop()
     }
 
     public func changeRoom(_ name: String) {
         mesh.setRoom(name)
+        webBridge?.stop()
+        webBridge = nil
+        bridgedClientCount = 0
     }
 
     public func kickPeer(_ senderId: String) {
@@ -161,6 +179,12 @@ public final class AppRuntime: ObservableObject {
             DispatchQueue.main.async { self.lastWriter = String(s.senderId.prefix(8)) }
         }
         engine.handleRemote(message)
+        webBridge?.broadcastToClients(message)
+    }
+
+    fileprivate func handleWebClientMessage(_ message: SyncMessage, fromClient id: String) {
+        engine.handleRemote(message)
+        mesh.broadcast(message)
     }
 
     fileprivate func peersChanged(_ connected: [ConnectedPeer], _ discovered: [DiscoveredPeer], room: String) {
@@ -169,8 +193,35 @@ public final class AppRuntime: ObservableObject {
             self.discoveredPeers = discovered
             self.currentRoom = room
             self.reconcileRole()
+            self.reconcileBridge()
         }
     }
+
+    private func reconcileBridge() {
+        let peerIds = connectedPeers.map { $0.senderId }
+        let shouldRun = BridgeElection.shouldBridge(localId: senderId, peerIds: peerIds)
+        if shouldRun && webBridge == nil {
+            let b = Bridge(port: 8732, room: currentRoom)
+            if bridgeRelay == nil { bridgeRelay = BridgeRelay(owner: self) }
+            b.delegate = bridgeRelay
+            do {
+                try b.start()
+                webBridge = b
+                Log.player.info("web bridge started on :8732")
+            } catch {
+                Log.player.error("web bridge start failed: \(error.localizedDescription, privacy: .public)")
+            }
+        } else if !shouldRun && webBridge != nil {
+            webBridge?.stop()
+            webBridge = nil
+            bridgedClientCount = 0
+            Log.player.info("web bridge stopped (lost election)")
+        }
+    }
+}
+
+final class WebBridgeBox: @unchecked Sendable {
+    var bridge: Bridge?
 }
 
 final class MeshBridge: PeerMeshDelegate, @unchecked Sendable {
@@ -185,6 +236,19 @@ final class MeshBridge: PeerMeshDelegate, @unchecked Sendable {
     func peerMesh(_ mesh: PeerMesh, peersChanged connected: [ConnectedPeer], discovered: [DiscoveredPeer], room: String) {
         let ownerRef = owner
         Task { @MainActor in ownerRef?.peersChanged(connected, discovered, room: room) }
+    }
+}
+
+private final class BridgeRelay: BridgeDelegate, @unchecked Sendable {
+    weak var owner: AppRuntime?
+    init(owner: AppRuntime) { self.owner = owner }
+    func bridge(_ bridge: Bridge, didReceive message: SyncMessage, fromClient id: String) {
+        let ownerRef = owner
+        Task { @MainActor in ownerRef?.handleWebClientMessage(message, fromClient: id) }
+    }
+    func bridge(_ bridge: Bridge, clientsChanged count: Int) {
+        let ownerRef = owner
+        Task { @MainActor in ownerRef?.bridgedClientCount = count }
     }
 }
 
