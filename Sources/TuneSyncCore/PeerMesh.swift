@@ -313,11 +313,18 @@ public final class PeerMesh: @unchecked Sendable {
             switch msg {
             case .hello(let h):
                 // Update existing peer's host claim if we already know them
-                if peers[h.senderId] != nil {
+                if let existing = peers[h.senderId] {
                     let newHost = h.host ?? false
-                    if peers[h.senderId]!.isHost != newHost {
+                    if existing.isHost != newHost {
                         peers[h.senderId]!.isHost = newHost
                         notifyChange()
+                    }
+                    // Duplicate connection from a racing dial — cancel the new one.
+                    if existing.connection !== conn && existing.connection.endpoint != conn.endpoint {
+                        Log.mesh.info("hello collision for \(h.senderId, privacy: .public) — keeping older conn, cancelling new")
+                        conn.cancel()
+                        pendingByEndpoint.removeValue(forKey: conn.endpoint)
+                        pendingParsers.removeValue(forKey: conn.endpoint)
                     }
                 } else if h.senderId != senderId {
                     if kicked.contains(h.senderId) {
@@ -359,6 +366,18 @@ public final class PeerMesh: @unchecked Sendable {
                 break
             }
         }
+    }
+
+    /// Pure decision: when a hello arrives for a peer we already track,
+    /// should we replace the existing connection or keep it?
+    /// Returns true if the new connection should replace the old one.
+    internal static func shouldReplaceExistingPeer(
+        existingConnectedAt: Date,
+        newHelloAt: Date
+    ) -> Bool {
+        // Always keep the older connection. New hellos for known peers
+        // are duplicates from a racing dial — drop the new one.
+        return false
     }
 
     private func peerId(forEndpoint endpoint: NWEndpoint) -> String? {
