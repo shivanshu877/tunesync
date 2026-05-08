@@ -75,13 +75,29 @@ public final class SyncEngine: @unchecked Sendable {
     private let suppressionMs: Int
     private let heartbeatSeconds: Int
 
+    /// Estimated time between "we received the host's state message" and
+    /// "the WebView's <video> element actually finished seeking" — bridge
+    /// dispatch + JS evaluation + DOM update + DASH segment fetch + seek
+    /// complete. We add this to the network-elapsed compensation so the
+    /// receiver lands on "where the host will be when seek finishes,"
+    /// not "where the host was when the message left."
+    private let applyOverheadMs: Int
+
+    /// Maximum total compensation we'll apply (network elapsed + apply
+    /// overhead). Defends against pathological clock skew while still
+    /// covering realistic LAN RTT (typically <100 ms) plus worst-case
+    /// Wi-Fi jitter (a few hundred ms).
+    private let compCapMs: Int
+
     public init(
         senderId: String,
         broadcast: @escaping (SyncMessage) -> Void,
         applyState: @escaping (PlayerState) -> Void,
         debounceMs: Int = 200,
         suppressionMs: Int = 1500,
-        heartbeatSeconds: Int = 3
+        heartbeatSeconds: Int = 1,
+        applyOverheadMs: Int = 250,
+        compCapMs: Int = 1500
     ) {
         self.senderId = senderId
         self.broadcast = broadcast
@@ -89,6 +105,8 @@ public final class SyncEngine: @unchecked Sendable {
         self.debounceMs = debounceMs
         self.suppressionMs = suppressionMs
         self.heartbeatSeconds = heartbeatSeconds
+        self.applyOverheadMs = applyOverheadMs
+        self.compCapMs = compCapMs
     }
 
     public func applyStateOverride(_ apply: @escaping (PlayerState) -> Void) {
@@ -145,18 +163,26 @@ public final class SyncEngine: @unchecked Sendable {
             lastApplied = key
             suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
 
-            // Latency compensation: if peer is playing, advance `t` by however
-            // long the message took to reach us. Capped at 800ms — typical LAN
-            // RTT is <20ms; anything beyond ~800ms is more likely to be Mac
-            // clock skew than real network delay.
+            // Two-part compensation if the peer is playing:
+            //   1. Network elapsed: localNow - clientMs — the time the
+            //      message spent traveling. Skipped if non-positive
+            //      (peer's clock ahead of ours) or beyond compCap (likely
+            //      clock skew, not real latency).
+            //   2. Apply overhead: a constant estimate of how long it
+            //      takes from "we received" to "<video> actually seeked."
+            //      Without this, the seek lands on stale ground because
+            //      the host kept playing during our processing time.
             var effectiveT = s.t
             var compNote: String? = nil
             if s.playing, let cms = s.clientMs {
                 let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-                let elapsedMs = nowMs - cms
-                if elapsedMs > 0 && elapsedMs < 800 {
-                    effectiveT += Double(elapsedMs) / 1000.0
-                    compNote = "+\(elapsedMs)ms latency comp"
+                let networkMs = nowMs - cms
+                if networkMs >= 0 {
+                    let totalMs = min(networkMs + Int64(applyOverheadMs), Int64(compCapMs))
+                    if totalMs > 0 {
+                        effectiveT += Double(totalMs) / 1000.0
+                        compNote = "+\(totalMs)ms (\(networkMs)net + \(applyOverheadMs)apply)"
+                    }
                 }
             }
 

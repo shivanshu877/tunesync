@@ -173,8 +173,8 @@ final class SyncEngineTests: XCTestCase {
             clientMs: nowMs - 500   // peer sent 500 ms ago
         )))
         XCTAssertEqual(r.applies.count, 1)
-        // Should have advanced t by ~0.5s
-        XCTAssertEqual(r.applies[0].t, 10.5, accuracy: 0.15)
+        // 500ms network + 250ms apply overhead = ~750ms forward seek
+        XCTAssertEqual(r.applies[0].t, 10.75, accuracy: 0.15)
     }
 
     func testLatencyCompensationSkippedForPause() {
@@ -191,8 +191,8 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
     }
 
-    func testLatencyCompensationCappedAt800ms() {
-        // Defends against badly skewed Mac clocks: don't advance more than ~800ms.
+    func testLatencyCompensationCappedAtCompCap() {
+        // Defends against badly skewed Mac clocks: don't advance beyond compCap (1500ms).
         let r = Recorder()
         let e = makeEngine(recorder: r)
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
@@ -202,20 +202,38 @@ final class SyncEngineTests: XCTestCase {
             clientMs: nowMs - 60_000   // peer's clock claims 60s in the past
         )))
         XCTAssertEqual(r.applies.count, 1)
-        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+        // Capped at 1.5s (compCapMs default). Anything beyond is treated as skew.
+        XCTAssertEqual(r.applies[0].t, 11.5, accuracy: 0.05)
     }
 
-    func testLatencyCompensationAppliesUnder800ms() {
+    func testLatencyCompensationAppliesNetworkPlusApplyOverhead() {
         let r = Recorder()
         let e = makeEngine(recorder: r)
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         e.handleRemote(.state(StateMessage(
             senderId: "peer", ts: 1000,
             videoId: "vid", t: 10.0, playing: true,
-            clientMs: nowMs - 700   // 700ms — under cap, should comp
+            clientMs: nowMs - 100   // 100ms network — under cap, should comp
         )))
         XCTAssertEqual(r.applies.count, 1)
-        XCTAssertEqual(r.applies[0].t, 10.7, accuracy: 0.15)
+        // 100ms net + 250ms apply = ~350ms total
+        XCTAssertEqual(r.applies[0].t, 10.35, accuracy: 0.10)
+    }
+
+    func testLatencyCompensationOnZeroNetworkAddsApplyOverhead() {
+        // Even when network elapsed is 0 (best case), receiver should still
+        // shift forward by applyOverheadMs to land on where host will be
+        // when seek finishes.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 1000,
+            videoId: "vid", t: 10.0, playing: true,
+            clientMs: nowMs   // exactly now
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertEqual(r.applies[0].t, 10.25, accuracy: 0.05)
     }
 
     func testLatencyCompensationSkippedForNegativeElapsed() {
