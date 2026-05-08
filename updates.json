@@ -1,5 +1,5 @@
 {
-  "version": "0.2.7",
-  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.2.7.dmg",
-  "notes": "- feat: host role — only host heartbeats, fixes free-for-all sync war"
+  "version": "0.2.8",
+  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.2.8.dmg",
+  "notes": "- fix(sync): track-change reliability — bypass cooldown, hook more events, poll for videoId changes\n- build: bump local Makefile to 0.2.7 for consistency"
 }
