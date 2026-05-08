@@ -130,3 +130,24 @@ Two Macs same Wi-Fi, both signed into YT Music.
 
 1. Both Macs on same Wi-Fi, both signed-out.
 2. Mac A plays a track via search. Mac B receives state and plays the same track in sync.
+
+## Session-import scenarios (post 0.3.0)
+
+### Brave / Chrome / Edge import
+
+1. Sign into YT Music in Brave on the test Mac.
+2. In TuneSync, click "Import session" in toolbar.
+3. Click "Import from Brave". macOS may prompt to allow Keychain access — approve.
+4. Sheet shows "Imported N cookies. Reloaded." TuneSync's WebView shows signed-in YT Music.
+
+### Safari import
+
+1. Sign into YT Music in Safari.
+2. Click "Import from Safari". If Full Disk Access missing, sheet says so.
+3. Grant FDA in System Settings → Privacy & Security → Full Disk Access → TuneSync. Restart app.
+4. Try again. Imports.
+
+### Clear
+
+1. Click "Clear imported session" in sheet.
+2. WebView reloads to signed-out state.
