@@ -1,5 +1,5 @@
 {
-  "version": "0.4.2",
-  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.4.2.dmg",
-  "notes": "- Merge pull request #3 from shivanshu877/fix/update-popup-scrollable-notes\n- fix(updater): scroll long release notes so Download button stays visible"
+  "version": "0.4.4",
+  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.4.4.dmg",
+  "notes": "- Merge pull request #4 from shivanshu877/fix/scheduled-play-loop\n- fix(sync): break pre-pause loop + align web bridge to wall-clock schedule\n- fix(sync): stop scheduled-play countdown from looping every 3s"
 }
