@@ -7,6 +7,8 @@ final class SyncEngineTests: XCTestCase {
         var broadcasts: [SyncMessage] = []
         var applies: [PlayerState] = []
         var appliesScheduledAt: [Int64?] = []
+        var appliesClientMs: [Int64?] = []
+        var appliesOffsetMs: [Int64] = []
     }
 
     private func makeEngine(
@@ -17,9 +19,11 @@ final class SyncEngineTests: XCTestCase {
         return SyncEngine(
             senderId: senderId,
             broadcast: { recorder.broadcasts.append($0) },
-            applyState: { state, startAtMs in
+            applyState: { state, startAtMs, clientMs, offsetMs in
                 recorder.applies.append(state)
                 recorder.appliesScheduledAt.append(startAtMs)
+                recorder.appliesClientMs.append(clientMs)
+                recorder.appliesOffsetMs.append(offsetMs)
             },
             clockOffsetMsFor: clockOffsetMsFor
         )
@@ -169,289 +173,114 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertLessThanOrEqual(s.clientMs!, after)
     }
 
-    func testLatencyCompensationAdvancesPlayingT() {
+    // MARK: - PLL-follower model
+
+    func testPlainPlayBroadcastsNoStartAtMs() {
+        // Plain play on the existing track must NOT schedule.
+        // Receiver-side PLL handles convergence via rate-bend.
         let r = Recorder()
         let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "vid", t: 10.0, playing: true,
-            clientMs: nowMs - 500   // peer sent 500 ms ago
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        // 500ms network + 250ms apply overhead = ~750ms forward seek
-        XCTAssertEqual(r.applies[0].t, 10.75, accuracy: 0.15)
-    }
-
-    func testLatencyCompensationSkippedForPause() {
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "vid", t: 10.0, playing: false,
-            clientMs: nowMs - 500
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        // Pause: position is the literal pause point, no comp
-        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
-    }
-
-    func testLatencyCompensationCappedAtCompCap() {
-        // Defends against badly skewed Mac clocks: don't advance beyond compCap (1500ms).
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "vid", t: 10.0, playing: true,
-            clientMs: nowMs - 60_000   // peer's clock claims 60s in the past
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        // Capped at 1.5s (compCapMs default). Anything beyond is treated as skew.
-        XCTAssertEqual(r.applies[0].t, 11.5, accuracy: 0.05)
-    }
-
-    func testLatencyCompensationAppliesNetworkPlusApplyOverhead() {
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "vid", t: 10.0, playing: true,
-            clientMs: nowMs - 100   // 100ms network — under cap, should comp
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        // 100ms net + 250ms apply = ~350ms total
-        XCTAssertEqual(r.applies[0].t, 10.35, accuracy: 0.10)
-    }
-
-    // MARK: - Scheduled play
-
-    func testLocalPlayBroadcastIncludesStartAtMs() {
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let before = Int64(Date().timeIntervalSince1970 * 1000)
+        // Establish a prior broadcast so lastBroadcastVideoId is set.
+        e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: false))
+        e.flushDebounceForTesting()
         e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: true))
         e.flushDebounceForTesting()
         guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
-        XCTAssertNotNil(s.startAtMs)
-        // 2000ms schedule buffer (default), allow ±300ms scheduler jitter
-        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 1700)
-        XCTAssertLessThanOrEqual(s.startAtMs!, before + 2300)
+        XCTAssertNil(s.startAtMs, "plain play (same videoId) must not schedule")
+        XCTAssertTrue(s.playing)
     }
 
-    func testLocalPauseBroadcastNoStartAtMs() {
+    func testPauseBroadcastsNoStartAtMs() {
         let r = Recorder()
         let e = makeEngine(recorder: r)
-        e.localStateChanged(PlayerState(videoId: "v", t: 5, playing: false))
+        e.localStateChanged(PlayerState(videoId: "v", t: 10, playing: false))
         e.flushDebounceForTesting()
         guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
-        XCTAssertNil(s.startAtMs, "pauses should propagate immediately, no schedule")
+        XCTAssertNil(s.startAtMs, "pause must never schedule")
     }
 
-    func testHostHeartbeatNoStartAtMs() {
+    func testTrackChangeBroadcastsCarryStartAtMs() {
         let r = Recorder()
         let e = makeEngine(recorder: r)
-        e.role = .host
-        e.localStateChanged(PlayerState(videoId: "v", t: 5, playing: true))
+        // First track establishes lastBroadcastVideoId.
+        e.localStateChanged(PlayerState(videoId: "first", t: 30, playing: true))
         e.flushDebounceForTesting()
-        XCTAssertEqual(r.broadcasts.count, 1)
-        XCTAssertNotNil(r.broadcasts[0].stateOrNil()?.startAtMs, "user-driven play scheduled")
-
-        e.heartbeatTickForTesting()
-        XCTAssertEqual(r.broadcasts.count, 2)
-        XCTAssertNil(r.broadcasts[1].stateOrNil()?.startAtMs, "heartbeat is steady-state, never scheduled")
-    }
-
-    func testRemoteScheduledPlayIsForwardedToApply() {
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let scheduledAt = nowMs + 500
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "v", t: 10.0, playing: true,
-            clientMs: nowMs - 100,
-            startAtMs: scheduledAt
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        XCTAssertEqual(r.appliesScheduledAt[0], scheduledAt, "scheduled time forwarded to apply layer")
-        // Latency comp NOT applied — schedule handles cross-Mac alignment
-        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
-    }
-
-    func testScheduledPlaySuppressesRebroadcastUntilAfterFire() {
-        // Regression: when a scheduled play applies (3-second buffer), the
-        // local play event that fires at startAtMs must NOT be re-broadcast.
-        // Otherwise every Mac re-arms another 3-second countdown in a loop.
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        let scheduledAt = nowMs + 200  // small in-future schedule for test
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 9_000_000_000_000,
-            videoId: "v", t: 10.0, playing: true,
-            clientMs: nowMs,
-            startAtMs: scheduledAt
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-
-        // Simulate the JS play event firing at the scheduled instant.
-        Thread.sleep(forTimeInterval: 0.30)
-        e.localStateChanged(PlayerState(videoId: "v", t: 10.0, playing: true))
+        // Second broadcast switches videoId while playing — track change.
+        e.localStateChanged(PlayerState(videoId: "second", t: 0, playing: true))
         e.flushDebounceForTesting()
-        XCTAssertEqual(r.broadcasts.count, 0,
-            "play event after scheduled fire must stay suppressed — no second countdown")
-    }
-
-    func testSteadyStatePlayingDoesNotRescheduleEvery5s() {
-        // Regression: the injected JS posts state every 5s while playing.
-        // If flushDebounce treats every playing=true as a transition, it
-        // re-arms a 3-second scheduled play, which pre-pauses the music in
-        // an infinite loop. Only the first transition should schedule.
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-
-        e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: true))
-        e.flushDebounceForTesting()
-        XCTAssertEqual(r.broadcasts.count, 1, "first play broadcasts")
-        XCTAssertNotNil(r.broadcasts[0].stateOrNil()?.startAtMs, "first play is scheduled")
-
-        // Wait past suppressUntil window (startAt + 750ms grace) so the
-        // next localStateChanged isn't dropped by suppression — we want to
-        // verify the dedupe runs INSIDE flushDebounce too.
-        Thread.sleep(forTimeInterval: 4.0)
-
-        // JS periodic catch-up: re-posts playing=true with later t.
-        e.localStateChanged(PlayerState(videoId: "v", t: 5, playing: true))
-        e.flushDebounceForTesting()
-        XCTAssertEqual(r.broadcasts.count, 2, "steady-state ping still broadcasts")
-        XCTAssertNil(r.broadcasts[1].stateOrNil()?.startAtMs,
-            "steady-state play must NOT carry startAtMs — that would re-arm countdown loop")
-    }
-
-    func testRemoteUnscheduledPlayStillUsesLatencyComp() {
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
+        guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
+        XCTAssertNotNil(s.startAtMs, "track change must schedule so peers can load")
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "v", t: 10.0, playing: true,
-            clientMs: nowMs - 100   // 100ms ago
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        XCTAssertNil(r.appliesScheduledAt[0], "no schedule when message has no startAtMs")
-        XCTAssertEqual(r.applies[0].t, 10.35, accuracy: 0.10, "100ms net + 250ms apply overhead")
+        XCTAssertTrue(abs(s.startAtMs! - (nowMs + 300)) <= 300,
+            "track-change schedule should be ~300ms in future")
     }
 
-    func testLocalPlayAppliesItselfWithSchedule() {
-        // The host's own click-play should also wait for the schedule
-        // window so the host doesn't play 250ms ahead of every guest.
+    func testApplyForwardsClientMsAndOffsetForPLL() {
+        // Receivers need clientMs + offsetMs to do PLL math in JS.
         let r = Recorder()
-        let e = makeEngine(recorder: r)
-        e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: true))
-        e.flushDebounceForTesting()
-        XCTAssertEqual(r.applies.count, 1)
-        XCTAssertNotNil(r.appliesScheduledAt[0], "local play scheduled too")
-    }
-
-    // MARK: - Latency comp regression tests
-
-    func testLatencyCompensationOnZeroNetworkAddsApplyOverhead() {
-        // Even when network elapsed is 0 (best case), receiver should still
-        // shift forward by applyOverheadMs to land on where host will be
-        // when seek finishes.
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "vid", t: 10.0, playing: true,
-            clientMs: nowMs   // exactly now
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        XCTAssertEqual(r.applies[0].t, 10.25, accuracy: 0.05)
-    }
-
-    func testLatencyCompensationSkippedForNegativeElapsed() {
-        // Peer's clock is ahead of ours; we should NOT subtract.
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "vid", t: 10.0, playing: true,
-            clientMs: nowMs + 5_000    // peer's clock 5s in the future
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
-    }
-
-    func testMissingClientMsBackwardsCompat() {
-        // Older clients won't send clientMs — must still apply.
-        let r = Recorder()
-        let e = makeEngine(recorder: r)
-        e.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 1000,
-            videoId: "vid", t: 10.0, playing: true,
-            clientMs: nil
-        )))
-        XCTAssertEqual(r.applies.count, 1)
-        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
-    }
-
-    func testNilStartAtMsWithNegativeOffsetDoesNotScheduleFalsely() {
-        // Heartbeat-style message: startAtMs is nil. Peer clock is BEHIND
-        // ours (offsetMs negative). Old buggy math: (nil ?? 0) - (-X) = +X,
-        // which could flip isScheduled true and forward a bogus schedule.
-        // New math must treat nil as "not scheduled" regardless of offset.
-        let r = Recorder()
-        let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in -5_000_000_000_000 })
+        let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in 1234 })
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         e.handleRemote(.state(StateMessage(
             senderId: "peer", ts: 9_000_000_000_000,
             videoId: "v", t: 10.0, playing: true,
             clientMs: nowMs - 100
-            // startAtMs intentionally nil
         )))
         XCTAssertEqual(r.applies.count, 1)
-        XCTAssertNil(r.appliesScheduledAt[0],
-            "nil startAtMs must never schedule, regardless of clock offset sign")
+        XCTAssertEqual(r.appliesClientMs[0], nowMs - 100,
+            "clientMs forwarded to apply for receiver PLL")
+        XCTAssertEqual(r.appliesOffsetMs[0], 1234,
+            "offsetMs forwarded to apply for receiver PLL")
+        // No latency comp on t — JS-side PLL handles it.
+        XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
     }
 
-    func testScheduledPlayHonorsClockOffset() {
-        // Peer's clock is 2000 ms ahead of ours. Their `startAtMs = nowMs + 500`
-        // translates to localStartAt = nowMs - 1500 (already in our past) → must
-        // NOT be treated as scheduled.
+    func testRemoteTrackChangeStartAtMsForwarded() {
+        // Track-change messages still carry startAtMs (host wall-clock),
+        // and apply must forward it in OUR local clock frame.
+        let r = Recorder()
+        let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in 0 })
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 0.0, playing: true,
+            clientMs: nowMs,
+            startAtMs: nowMs + 500
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertEqual(r.appliesScheduledAt[0], nowMs + 500,
+            "track-change startAtMs forwarded (offset=0 here)")
+    }
+
+    func testRemotePlainPlayHasNoScheduledAt() {
+        // A plain (non-track-change) play arrives without startAtMs;
+        // apply forwards nil for scheduledAt.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs - 50
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertNil(r.appliesScheduledAt[0])
+    }
+
+    func testScheduledTrackChangeHonorsClockOffset() {
+        // Peer 2s ahead; track-change startAtMs = nowMs + 2500 (host clock)
+        // → localStartAt = nowMs + 500 in our clock frame.
         let r = Recorder()
         let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in 2000 })
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         e.handleRemote(.state(StateMessage(
             senderId: "peer", ts: 9_000_000_000_000,
-            videoId: "v", t: 10.0, playing: true,
+            videoId: "v", t: 0.0, playing: true,
             clientMs: nowMs,
-            startAtMs: nowMs + 500
+            startAtMs: nowMs + 2500
         )))
         XCTAssertEqual(r.applies.count, 1)
-        XCTAssertNil(r.appliesScheduledAt[0],
-            "peer 2s ahead means their +500ms schedule lies in our past — apply now, not scheduled")
-
-        // Same peer, but `startAtMs = nowMs + 2500` → localStartAt = nowMs + 500 → scheduled.
-        let r2 = Recorder()
-        let e2 = makeEngine(recorder: r2, clockOffsetMsFor: { _ in 2000 })
-        let now2 = Int64(Date().timeIntervalSince1970 * 1000)
-        e2.handleRemote(.state(StateMessage(
-            senderId: "peer", ts: 9_000_000_000_000,
-            videoId: "v", t: 10.0, playing: true,
-            clientMs: now2,
-            startAtMs: now2 + 2500
-        )))
-        XCTAssertEqual(r2.applies.count, 1)
-        XCTAssertNotNil(r2.appliesScheduledAt[0])
-        // Forwarded value is in OUR clock frame, not the host's.
-        let forwarded = r2.appliesScheduledAt[0]!
-        XCTAssertTrue(abs(forwarded - (now2 + 2500 - 2000)) <= 50,
-            "forwarded startAtMs must be host's startAtMs minus the offset (got \(forwarded))")
+        let forwarded = r.appliesScheduledAt[0]!
+        XCTAssertTrue(abs(forwarded - (nowMs + 500)) <= 50,
+            "forwarded startAtMs in local clock frame, got \(forwarded)")
     }
 }

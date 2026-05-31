@@ -57,7 +57,7 @@ public final class AppRuntime: ObservableObject {
                 mesh?.broadcast(msg)
                 webBridgeBox.bridge?.broadcastToClients(msg)
             },
-            applyState: { _, _ in },
+            applyState: { _, _, _, _ in },
             clockOffsetMsFor: { [weak mesh] sid in
                 mesh?.peerOffsetMs(senderId: sid) ?? 0
             }
@@ -66,10 +66,10 @@ public final class AppRuntime: ObservableObject {
         self.engine = engine
         self.mesh = mesh
 
-        self.engine.applyStateOverride { [weak self] state, startAtMs in
+        self.engine.applyStateOverride { [weak self] state, startAtMs, clientMs, offsetMs in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.player.applyState(state, startAtMs: startAtMs)
+                self.player.applyState(state, startAtMs: startAtMs, clientMs: clientMs, offsetMs: offsetMs)
                 let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
                 if let s = startAtMs, s > nowMs, state.playing {
                     self.scheduledAtMs = s

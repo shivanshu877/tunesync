@@ -61,10 +61,13 @@ public final class SyncEngine: @unchecked Sendable {
     private let historyCap = 30
 
     private let broadcast: (SyncMessage) -> Void
-    /// Apply callback receives `(state, startAtMs)`. If `startAtMs` is
-    /// non-nil and in the future, the apply layer must schedule the
-    /// play() to fire at that wall-clock time (vs immediate apply).
-    private var applyStateImpl: (PlayerState, Int64?) -> Void
+    /// Apply callback `(state, startAtMs, clientMs, offsetMs)`.
+    /// - `startAtMs` (local clock): non-nil only for track-change loads.
+    /// - `clientMs`: host's wall-clock when the message was encoded — drives
+    ///   the receiver's PLL math (`target_t = t + (hostNow - clientMs)/1000`).
+    /// - `offsetMs`: host's clock offset relative to ours (already applied
+    ///   to `startAtMs`, passed through so JS can convert `clientMs`).
+    private var applyStateImpl: (PlayerState, Int64?, Int64?, Int64) -> Void
     private let clock = LamportClock()
 
     private var lastApplied: (ts: Int64, senderId: String) = (0, "")
@@ -98,9 +101,11 @@ public final class SyncEngine: @unchecked Sendable {
     /// click-to-audio delay for perfect cross-Mac sync at the play moment.
     private let scheduleBufferMs: Int
 
-    /// Tracks last *broadcasted* playing state so we can tell transitions
-    /// (paused → playing) apart from steady-state heartbeats.
-    private var lastBroadcastPlaying: Bool = false
+    /// Tracks the last *broadcasted* videoId so we can detect track-change
+    /// transitions (which DO need a wall-clock schedule so peers have time
+    /// to loadVideoById). Plain play / pause / seek don't need scheduling —
+    /// the follower-side PLL converges from any starting drift.
+    private var lastBroadcastVideoId: String?
 
     /// Maps a sender's id to the NTP-style estimate of (their clock − our clock) in ms.
     /// Subtract from a remote `startAtMs` to convert it into our local clock frame.
@@ -110,13 +115,13 @@ public final class SyncEngine: @unchecked Sendable {
     public init(
         senderId: String,
         broadcast: @escaping (SyncMessage) -> Void,
-        applyState: @escaping (PlayerState, Int64?) -> Void,
+        applyState: @escaping (PlayerState, Int64?, Int64?, Int64) -> Void,
         debounceMs: Int = 200,
         suppressionMs: Int = 1500,
         heartbeatSeconds: Int = 1,
         applyOverheadMs: Int = 250,
         compCapMs: Int = 1500,
-        scheduleBufferMs: Int = 2000,
+        scheduleBufferMs: Int = 300,
         clockOffsetMsFor: @escaping (String) -> Int = { _ in 0 }
     ) {
         self.senderId = senderId
@@ -131,7 +136,7 @@ public final class SyncEngine: @unchecked Sendable {
         self.clockOffsetMsFor = clockOffsetMsFor
     }
 
-    public func applyStateOverride(_ apply: @escaping (PlayerState, Int64?) -> Void) {
+    public func applyStateOverride(_ apply: @escaping (PlayerState, Int64?, Int64?, Int64) -> Void) {
         applyStateImpl = apply
     }
 
@@ -183,55 +188,30 @@ public final class SyncEngine: @unchecked Sendable {
                 return
             }
             lastApplied = key
+            suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
 
-            // If the message is scheduled (startAtMs present and in the
-            // future), don't apply latency comp — the schedule itself
-            // handles inter-Mac alignment by virtue of all peers waiting
-            // for the same wall-clock instant.
-            //
-            // Convert the host's wall-clock `startAtMs` into our local clock
-            // frame using the per-peer NTP-style offset. Subtract because
-            // `clockOffsetMsFor` returns (their_clock − our_clock) ms.
+            // Convert track-change `startAtMs` (host wall-clock) into our
+            // local clock frame via the per-peer NTP-style offset.
+            // Plain play/pause/seek carry no startAtMs — receiver-side PLL
+            // (in JS) converges via continuous rate-bend instead.
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let offsetMs = Int64(clockOffsetMsFor(s.senderId))
             let localStartAt: Int64? = s.startAtMs.map { $0 - offsetMs }
             let isScheduled: Bool = (localStartAt ?? 0) > nowMs
 
-            // Suppress local rebroadcasts until *after* the scheduled play
-            // actually fires. Without this, the play event triggered by the
-            // scheduled timer re-enters flushDebounce and schedules another
-            // 3-second countdown — overlay re-appears in a loop.
-            if isScheduled, let local = localStartAt {
-                let until = Date(timeIntervalSince1970: Double(local) / 1000.0)
-                    .addingTimeInterval(0.75)
-                suppressUntil = max(suppressUntil, until)
-            } else {
-                suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
-            }
-
-            var effectiveT = s.t
-            var compNote: String? = nil
-            if !isScheduled, s.playing, let cms = s.clientMs {
-                let networkMs = nowMs - cms
-                if networkMs >= 0 {
-                    let totalMs = min(networkMs + Int64(applyOverheadMs), Int64(compCapMs))
-                    if totalMs > 0 {
-                        effectiveT += Double(totalMs) / 1000.0
-                        compNote = "+\(totalMs)ms (\(networkMs)net + \(applyOverheadMs)apply)"
-                    }
-                }
-            } else if isScheduled, let local = localStartAt {
-                let inMs = local - nowMs
-                compNote = "scheduled +\(inMs)ms (offset \(offsetMs)ms)"
-            }
+            let compNote: String? = isScheduled
+                ? "track-change +\((localStartAt ?? 0) - nowMs)ms (offset \(offsetMs)ms)"
+                : nil
 
             applyStateImpl(
-                PlayerState(videoId: s.videoId, t: effectiveT, playing: s.playing),
-                isScheduled ? localStartAt : nil
+                PlayerState(videoId: s.videoId, t: s.t, playing: s.playing),
+                isScheduled ? localStartAt : nil,
+                s.clientMs,
+                offsetMs
             )
             appendHistory(SyncEntry(
                 direction: .applied, senderId: s.senderId,
-                videoId: s.videoId, t: effectiveT, playing: s.playing,
+                videoId: s.videoId, t: s.t, playing: s.playing,
                 at: Date(), note: compNote
             ))
         case .hello, .bye, .ping, .pong:
@@ -258,35 +238,35 @@ public final class SyncEngine: @unchecked Sendable {
             ))
             return
         }
-        // Schedule a coordinated start only on a paused→playing transition.
-        // Steady-state catch-up reports (JS posts state every 5s while
-        // playing) must NOT re-arm a scheduled play — that pre-pauses the
-        // music for another 3 seconds in a loop. Pauses propagate
-        // immediately.
-        let scheduled = s.playing && !lastBroadcastPlaying
+        // Schedule a coordinated start ONLY on a real track change — both
+        // peers need ~200 ms to loadVideoById. Plain play / pause / seek
+        // broadcast immediately and let the receiver's PLL converge via
+        // rate-bend; no pre-pause, no countdown overlay.
+        let isTrackChange = (lastBroadcastVideoId != nil)
+            && (lastBroadcastVideoId != s.videoId)
+            && s.playing
+        let scheduled = isTrackChange
         let msg = buildStateMessage(s, scheduled: scheduled)
         broadcast(msg)
 
-        // Apply locally with the same schedule, so the host (or whoever
-        // initiated the action) honors the buffer too. Without this,
-        // the host plays immediately and is ~250ms ahead of every peer.
+        // Self-apply only for track change, so the host honors the same
+        // load window as peers. Plain transitions are already in their
+        // target state on the host (the user just acted on the player).
         if scheduled, let stateMsg = msg.stateOrNil() {
-            applyStateImpl(s, stateMsg.startAtMs)
-            // Mirror the suppression-past-fire behavior used on the receive
-            // path, so the host's own scheduled play doesn't loop either.
+            applyStateImpl(s, stateMsg.startAtMs, nil, 0)
             if let startAt = stateMsg.startAtMs {
                 let until = Date(timeIntervalSince1970: Double(startAt) / 1000.0)
-                    .addingTimeInterval(0.75)
+                    .addingTimeInterval(0.5)
                 suppressUntil = max(suppressUntil, until)
             }
         }
 
-        lastBroadcastPlaying = s.playing
+        lastBroadcastVideoId = s.videoId
         appendHistory(SyncEntry(
             direction: .sent, senderId: senderId,
             videoId: s.videoId, t: s.t, playing: s.playing,
             at: Date(),
-            note: scheduled ? "scheduled +\(scheduleBufferMs)ms" : "debounced"
+            note: scheduled ? "track-change scheduled +\(scheduleBufferMs)ms" : "broadcast"
         ))
     }
 
