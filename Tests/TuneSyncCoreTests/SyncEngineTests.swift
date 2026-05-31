@@ -401,6 +401,25 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
     }
 
+    func testNilStartAtMsWithNegativeOffsetDoesNotScheduleFalsely() {
+        // Heartbeat-style message: startAtMs is nil. Peer clock is BEHIND
+        // ours (offsetMs negative). Old buggy math: (nil ?? 0) - (-X) = +X,
+        // which could flip isScheduled true and forward a bogus schedule.
+        // New math must treat nil as "not scheduled" regardless of offset.
+        let r = Recorder()
+        let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in -5_000_000_000_000 })
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs - 100
+            // startAtMs intentionally nil
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertNil(r.appliesScheduledAt[0],
+            "nil startAtMs must never schedule, regardless of clock offset sign")
+    }
+
     func testScheduledPlayHonorsClockOffset() {
         // Peer's clock is 2000 ms ahead of ours. Their `startAtMs = nowMs + 500`
         // translates to localStartAt = nowMs - 1500 (already in our past) → must
