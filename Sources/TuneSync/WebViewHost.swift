@@ -2,6 +2,16 @@ import SwiftUI
 import WebKit
 import TuneSyncCore
 
+final class FocusableWebView: WKWebView {
+    override var acceptsFirstResponder: Bool { true }
+    override func mouseDown(with event: NSEvent) {
+        if window?.firstResponder !== self {
+            window?.makeFirstResponder(self)
+        }
+        super.mouseDown(with: event)
+    }
+}
+
 public struct WebViewHost: NSViewRepresentable {
     public let player: PlayerController
 
@@ -27,7 +37,7 @@ public struct WebViewHost: NSViewRepresentable {
 
         cfg.userContentController = userContent
 
-        let wv = WKWebView(frame: .zero, configuration: cfg)
+        let wv = FocusableWebView(frame: .zero, configuration: cfg)
         wv.navigationDelegate = context.coordinator
         wv.uiDelegate = context.coordinator
         wv.allowsBackForwardNavigationGestures = true
