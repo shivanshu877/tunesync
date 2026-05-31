@@ -215,7 +215,11 @@ public struct ConnectionManagerView: View {
                         .foregroundColor(.secondary)
                 }
                 if let diag = rt.lastDiag {
-                    if let why = diag.skipped {
+                    // "cooldown" is the normal echo-break window right after
+                    // an apply — it fires constantly during healthy sync and
+                    // is not user-actionable. Only surface skips that signal
+                    // a real problem (no video, no video-id).
+                    if let why = diag.skipped, why != "cooldown" {
                         Text("JS skipped last report: \(why)")
                             .font(.system(size: 10))
                             .foregroundColor(.orange)

@@ -279,6 +279,56 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
     }
 
+    func testScheduledPlaySuppressesRebroadcastUntilAfterFire() {
+        // Regression: when a scheduled play applies (3-second buffer), the
+        // local play event that fires at startAtMs must NOT be re-broadcast.
+        // Otherwise every Mac re-arms another 3-second countdown in a loop.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let scheduledAt = nowMs + 200  // small in-future schedule for test
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs,
+            startAtMs: scheduledAt
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+
+        // Simulate the JS play event firing at the scheduled instant.
+        Thread.sleep(forTimeInterval: 0.30)
+        e.localStateChanged(PlayerState(videoId: "v", t: 10.0, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.broadcasts.count, 0,
+            "play event after scheduled fire must stay suppressed — no second countdown")
+    }
+
+    func testSteadyStatePlayingDoesNotRescheduleEvery5s() {
+        // Regression: the injected JS posts state every 5s while playing.
+        // If flushDebounce treats every playing=true as a transition, it
+        // re-arms a 3-second scheduled play, which pre-pauses the music in
+        // an infinite loop. Only the first transition should schedule.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+
+        e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.broadcasts.count, 1, "first play broadcasts")
+        XCTAssertNotNil(r.broadcasts[0].stateOrNil()?.startAtMs, "first play is scheduled")
+
+        // Wait past suppressUntil window (startAt + 750ms grace) so the
+        // next localStateChanged isn't dropped by suppression — we want to
+        // verify the dedupe runs INSIDE flushDebounce too.
+        Thread.sleep(forTimeInterval: 4.0)
+
+        // JS periodic catch-up: re-posts playing=true with later t.
+        e.localStateChanged(PlayerState(videoId: "v", t: 5, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.broadcasts.count, 2, "steady-state ping still broadcasts")
+        XCTAssertNil(r.broadcasts[1].stateOrNil()?.startAtMs,
+            "steady-state play must NOT carry startAtMs — that would re-arm countdown loop")
+    }
+
     func testRemoteUnscheduledPlayStillUsesLatencyComp() {
         let r = Recorder()
         let e = makeEngine(recorder: r)

@@ -111,42 +111,48 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
     } else {
       player.unMute();
     }
-    function expectedT() {
-      var base = s.t || 0;
-      if (!s.playing) return base;
-      var hostNow = Date.now() - clockOffsetMs;
-      var elapsedMs = (typeof s.clientMs === 'number') ? (hostNow - s.clientMs) : 0;
-      if (elapsedMs < 0) elapsedMs = 0;
-      if (elapsedMs > 30000) elapsedMs = 0;
-      return base + elapsedMs / 1000;
-    }
+
+    // Pure wall-clock schedule model: the message carries `t` (playback
+    // position) and `startAtMs` (host wall-clock instant when every peer
+    // should hit play). No elapsed-time math — every peer just waits for
+    // the same instant and plays from the same `t`. Clock offset is
+    // measured via ping/pong; we convert host wall-clock → local clock
+    // with `localTarget = startAtMs - clockOffsetMs`.
+    var targetT = s.t || 0;
+    var scheduleMs = (typeof s.startAtMs === 'number') ? s.startAtMs : null;
+
     if (s.videoId && s.videoId !== lastVideoId) {
       lastVideoId = s.videoId;
-      player.loadVideoById(s.videoId, expectedT());
+      player.loadVideoById(s.videoId, targetT);
       trackEl.textContent = s.videoId;
-      return;
+      // Fall through — if scheduled, we still need to honor the wait.
     }
+
     var doApply = function () {
-      var target = expectedT();
       var current = player.getCurrentTime ? player.getCurrentTime() : 0;
-      var diff = current - target;
+      var diff = current - targetT;
+      // Big drift = hard seek. Small drift = nothing (don't fight the
+      // host's clock by rate-bending; let next event correct).
       if (Math.abs(diff) > 0.6) {
-        player.seekTo(target, true);
-      } else if (diff < -0.1) {
-        player.setPlaybackRate(1.25);
-        setTimeout(function () { if (player.setPlaybackRate) player.setPlaybackRate(1.0); }, 600);
-      } else if (diff > 0.1) {
-        player.setPlaybackRate(0.9);
-        setTimeout(function () { if (player.setPlaybackRate) player.setPlaybackRate(1.0); }, 600);
+        try { player.seekTo(targetT, true); } catch (e) {}
       }
       var st = player.getPlayerState ? player.getPlayerState() : -1;
       if (s.playing && st !== 1 && st !== 3) player.playVideo();
       else if (!s.playing && st === 1) player.pauseVideo();
     };
-    if (typeof s.applyAtMs === 'number') {
-      var localTarget = s.applyAtMs - clockOffsetMs;
+
+    if (scheduleMs !== null) {
+      var localTarget = scheduleMs - clockOffsetMs;
       var wait = localTarget - Date.now();
-      if (wait > 0 && wait < 1000) { setTimeout(doApply, wait); return; }
+      if (wait > 0 && wait < 5000) {
+        // Pre-pause + pre-seek so the only thing left at startAtMs is the
+        // single play() call — fires at the same wall-clock instant on
+        // every peer.
+        try { player.pauseVideo(); } catch (e) {}
+        try { player.seekTo(targetT, true); } catch (e) {}
+        setTimeout(doApply, wait);
+        return;
+      }
     }
     doApply();
   }
