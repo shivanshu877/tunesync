@@ -279,6 +279,30 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
     }
 
+    func testScheduledPlaySuppressesRebroadcastUntilAfterFire() {
+        // Regression: when a scheduled play applies (3-second buffer), the
+        // local play event that fires at startAtMs must NOT be re-broadcast.
+        // Otherwise every Mac re-arms another 3-second countdown in a loop.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let scheduledAt = nowMs + 200  // small in-future schedule for test
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs,
+            startAtMs: scheduledAt
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+
+        // Simulate the JS play event firing at the scheduled instant.
+        Thread.sleep(forTimeInterval: 0.30)
+        e.localStateChanged(PlayerState(videoId: "v", t: 10.0, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.broadcasts.count, 0,
+            "play event after scheduled fire must stay suppressed — no second countdown")
+    }
+
     func testRemoteUnscheduledPlayStillUsesLatencyComp() {
         let r = Recorder()
         let e = makeEngine(recorder: r)

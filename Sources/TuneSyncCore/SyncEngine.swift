@@ -176,7 +176,6 @@ public final class SyncEngine: @unchecked Sendable {
                 return
             }
             lastApplied = key
-            suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
 
             // If the message is scheduled (startAtMs present and in the
             // future), don't apply latency comp — the schedule itself
@@ -184,6 +183,18 @@ public final class SyncEngine: @unchecked Sendable {
             // for the same wall-clock instant.
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let isScheduled = (s.startAtMs ?? 0) > nowMs
+
+            // Suppress local rebroadcasts until *after* the scheduled play
+            // actually fires. Without this, the play event triggered by the
+            // scheduled timer re-enters flushDebounce and schedules another
+            // 3-second countdown — overlay re-appears in a loop.
+            if isScheduled, let startAt = s.startAtMs {
+                let until = Date(timeIntervalSince1970: Double(startAt) / 1000.0)
+                    .addingTimeInterval(0.75)
+                suppressUntil = max(suppressUntil, until)
+            } else {
+                suppressUntil = Date().addingTimeInterval(Double(suppressionMs) / 1000.0)
+            }
 
             var effectiveT = s.t
             var compNote: String? = nil
@@ -247,6 +258,13 @@ public final class SyncEngine: @unchecked Sendable {
         // the host plays immediately and is ~250ms ahead of every peer.
         if scheduled, let stateMsg = msg.stateOrNil() {
             applyStateImpl(s, stateMsg.startAtMs)
+            // Mirror the suppression-past-fire behavior used on the receive
+            // path, so the host's own scheduled play doesn't loop either.
+            if let startAt = stateMsg.startAtMs {
+                let until = Date(timeIntervalSince1970: Double(startAt) / 1000.0)
+                    .addingTimeInterval(0.75)
+                suppressUntil = max(suppressUntil, until)
+            }
         }
 
         lastBroadcastPlaying = s.playing
