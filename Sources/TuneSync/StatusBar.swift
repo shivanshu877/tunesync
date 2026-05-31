@@ -5,12 +5,14 @@ public struct StatusBar: View {
     @Binding public var lastWriter: String?
     @Binding public var adShowing: Bool
     @Binding public var room: String
+    @Binding public var bridgedClients: Int
 
-    public init(peerCount: Binding<Int>, lastWriter: Binding<String?>, adShowing: Binding<Bool>, room: Binding<String>) {
+    public init(peerCount: Binding<Int>, lastWriter: Binding<String?>, adShowing: Binding<Bool>, room: Binding<String>, bridgedClients: Binding<Int>) {
         self._peerCount = peerCount
         self._lastWriter = lastWriter
         self._adShowing = adShowing
         self._room = room
+        self._bridgedClients = bridgedClients
     }
 
     public var body: some View {
@@ -28,6 +30,14 @@ public struct StatusBar: View {
                     .foregroundColor(.secondary)
             }
             Spacer()
+            if bridgedClients > 0 {
+                HStack(spacing: 3) {
+                    Image(systemName: "globe")
+                    Text("\(bridgedClients) web")
+                }
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+            }
             if adShowing {
                 Text("ad — sync paused")
                     .font(.system(size: 12, weight: .semibold))

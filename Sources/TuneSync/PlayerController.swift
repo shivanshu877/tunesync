@@ -32,6 +32,13 @@ public final class PlayerController: NSObject {
         self.webView = webView
     }
 
+    public func navigate(to url: URL) {
+        guard let wv = webView else { return }
+        wv.load(URLRequest(url: url))
+    }
+
+    public func currentWebView() -> WKWebView? { return webView }
+
     public func handleMessage(_ payload: Any) {
         guard let dict = payload as? [String: Any] else { return }
         let kind = (dict["kind"] as? String) ?? ""

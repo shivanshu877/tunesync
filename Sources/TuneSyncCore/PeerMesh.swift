@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Network
 
@@ -36,6 +37,12 @@ public final class PeerMesh: @unchecked Sendable {
         let connectedAt: Date
         var parser = FrameParser()
         var isHost: Bool = false
+        var lastSeen: Date = Date()
+        var lastPingSent: Date = .distantPast
+        var lastPongMs: Int? = nil
+        var lastPingNonce: Int64? = nil
+        var lastPingAt: Date? = nil
+        var clockSync = ClockSync(windowSize: 5)
     }
 
     private struct Discovered: Equatable {
@@ -69,6 +76,27 @@ public final class PeerMesh: @unchecked Sendable {
 
     private var room: String
 
+    private var livenessTimer: DispatchSourceTimer?
+    private var pingTimeoutCount: Int = 0
+    private var nonceCounter: Int64 = 0
+
+    private var listenerRestartAttempt: Int = 0
+    private var browserRestartAttempt: Int = 0
+    private var listenerRestartCount: Int = 0
+    private var browserRestartCount: Int = 0
+    private var lastListenerState: String = "—"
+    private var lastBrowserState: String = "—"
+    private var stopping: Bool = false
+
+    private var pathMonitor: NWPathMonitor?
+    private var lastPath: NWPath?
+    private var pathRestartCount: Int = 0
+    private var lastPathStatus: String = "—"
+    private var lastPathInterface: String? = nil
+    private var unsatisfiedSince: Date? = nil
+    private var wakeObserver: NSObjectProtocol?
+    private var sleepObserver: NSObjectProtocol?
+
     public init(
         senderId: String,
         displayName: String,
@@ -84,9 +112,22 @@ public final class PeerMesh: @unchecked Sendable {
     public func start() {
         startListener()
         startBrowser()
+        startLivenessLoop()
+        startPathMonitor()
+        startWakeSleepObservers()
+        queue.async { [weak self] in self?.notifyChange() }
     }
 
     public func stop() {
+        stopping = true
+        livenessTimer?.cancel()
+        livenessTimer = nil
+        pathMonitor?.cancel()
+        pathMonitor = nil
+        if let w = wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(w) }
+        if let s = sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(s) }
+        wakeObserver = nil
+        sleepObserver = nil
         listener?.cancel()
         browser?.cancel()
         for (_, p) in peers { p.connection.cancel() }
@@ -113,13 +154,56 @@ public final class PeerMesh: @unchecked Sendable {
         get { queue.sync { room } }
     }
 
+    public func currentDiagnostics() -> MeshDiagnostics {
+        return queue.sync {
+            let now = Date()
+            let peerLiveness: [PeerLiveness] = peers.values.map { p in
+                PeerLiveness(
+                    senderId: p.id,
+                    lastSeen: p.lastSeen,
+                    lastPongMs: p.lastPongMs,
+                    connDurationS: now.timeIntervalSince(p.connectedAt),
+                    offsetMs: p.clockSync.estimatedOffsetMs(),
+                    rttMs: p.clockSync.estimatedRttMs()
+                )
+            }.sorted { $0.senderId < $1.senderId }
+            return MeshDiagnostics(
+                listenerState: lastListenerState,
+                browserState: lastBrowserState,
+                pathStatus: lastPathStatus,
+                interface: lastPathInterface,
+                listenerRestarts: listenerRestartCount,
+                browserRestarts: browserRestartCount,
+                pathRestarts: pathRestartCount,
+                pingTimeouts: pingTimeoutCount,
+                peers: peerLiveness
+            )
+        }
+    }
+
+    public func peerOffsetMs(senderId id: String) -> Int? {
+        return queue.sync {
+            return peers[id]?.clockSync.estimatedOffsetMs()
+        }
+    }
+
     public func setRoom(_ name: String) {
         queue.async { [self] in
             let trimmed = name.trimmingCharacters(in: .whitespaces)
             let next = trimmed.isEmpty ? "default" : trimmed
             if next == room { return }
+
+            // Polite goodbye to current peers so they remove us instantly.
+            let bye = SyncMessage.bye(ByeMessage(senderId: senderId))
+            if let data = try? JSONEncoder().encode(bye) {
+                let frame = FrameCodec.encode(data)
+                for (_, p) in peers {
+                    p.connection.send(content: frame, completion: .contentProcessed { _ in })
+                }
+            }
+
             room = next
-            // Drop all peers + restart with new room
+            stopping = true
             for (_, p) in peers { p.connection.cancel() }
             peers.removeAll()
             for (_, c) in pendingByEndpoint { c.cancel() }
@@ -129,9 +213,15 @@ public final class PeerMesh: @unchecked Sendable {
             kicked.removeAll()
             listener?.cancel()
             browser?.cancel()
-            startListener()
-            startBrowser()
-            notifyChange()
+
+            // Let mDNS goodbye propagate before re-listening.
+            queue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+                guard let self else { return }
+                self.stopping = false
+                self.startListener()
+                self.startBrowser()
+                self.notifyChange()
+            }
         }
     }
 
@@ -178,8 +268,22 @@ public final class PeerMesh: @unchecked Sendable {
             listener.newConnectionHandler = { [weak self] conn in
                 self?.acceptIncoming(conn)
             }
-            listener.stateUpdateHandler = { state in
-                Log.mesh.info("listener state \(String(describing: state), privacy: .public)")
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                self.queue.async {
+                    self.lastListenerState = String(describing: state)
+                    Log.mesh.info("listener state \(String(describing: state), privacy: .public)")
+                    switch state {
+                    case .ready:
+                        self.listenerRestartAttempt = 0
+                    case .failed:
+                        self.scheduleListenerRestart()
+                    case .cancelled:
+                        if !self.stopping { self.scheduleListenerRestart() }
+                    default:
+                        break
+                    }
+                }
             }
             listener.start(queue: queue)
             self.listener = listener
@@ -205,11 +309,48 @@ public final class PeerMesh: @unchecked Sendable {
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             self?.handleBrowse(results)
         }
-        browser.stateUpdateHandler = { state in
-            Log.mesh.info("browser state \(String(describing: state), privacy: .public)")
+        browser.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            self.queue.async {
+                self.lastBrowserState = String(describing: state)
+                Log.mesh.info("browser state \(String(describing: state), privacy: .public)")
+                switch state {
+                case .ready:
+                    self.browserRestartAttempt = 0
+                case .failed:
+                    self.scheduleBrowserRestart()
+                case .cancelled:
+                    if !self.stopping { self.scheduleBrowserRestart() }
+                default:
+                    break
+                }
+            }
         }
         browser.start(queue: queue)
         self.browser = browser
+    }
+
+    private func scheduleListenerRestart() {
+        let delay = MeshPolicy.restartBackoff(attempt: listenerRestartAttempt)
+        listenerRestartAttempt += 1
+        listenerRestartCount += 1
+        Log.mesh.info("scheduling listener restart in \(delay, privacy: .public)s (attempt \(self.listenerRestartAttempt, privacy: .public))")
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.listener?.cancel()
+            self.startListener()
+        }
+    }
+
+    private func scheduleBrowserRestart() {
+        let delay = MeshPolicy.restartBackoff(attempt: browserRestartAttempt)
+        browserRestartAttempt += 1
+        browserRestartCount += 1
+        queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            self.browser?.cancel()
+            self.startBrowser()
+        }
     }
 
     private func handleBrowse(_ results: Set<NWBrowser.Result>) {
@@ -230,10 +371,28 @@ public final class PeerMesh: @unchecked Sendable {
             if kicked.contains(id) { continue }
             if pendingByEndpoint[result.endpoint] != nil { continue }
 
-            let conn = NWConnection(to: result.endpoint, using: .tcp)
-            pendingByEndpoint[result.endpoint] = conn
-            pendingParsers[result.endpoint] = FrameParser()
-            configureConnection(conn, side: .outgoing)
+            if MeshPolicy.shouldDial(localId: senderId, remoteId: id) {
+                let conn = NWConnection(to: result.endpoint, using: .tcp)
+                pendingByEndpoint[result.endpoint] = conn
+                pendingParsers[result.endpoint] = FrameParser()
+                configureConnection(conn, side: .outgoing)
+            } else {
+                // Fallback dial: if we're the higher-id peer and the lower-id peer
+                // never connects within 5s (asymmetric reachability), dial anyway.
+                let endpoint = result.endpoint
+                let remoteId = id
+                queue.asyncAfter(deadline: .now() + .seconds(5)) { [weak self] in
+                    guard let self else { return }
+                    if self.peers[remoteId] != nil { return }
+                    if self.pendingByEndpoint[endpoint] != nil { return }
+                    if self.kicked.contains(remoteId) { return }
+                    Log.mesh.info("fallback dial \(remoteId, privacy: .public) — tie-break peer never connected")
+                    let conn = NWConnection(to: endpoint, using: .tcp)
+                    self.pendingByEndpoint[endpoint] = conn
+                    self.pendingParsers[endpoint] = FrameParser()
+                    self.configureConnection(conn, side: .outgoing)
+                }
+            }
         }
 
         if newDiscovered != discovered {
@@ -304,6 +463,7 @@ public final class PeerMesh: @unchecked Sendable {
 
         if let id = existingPeerId {
             peers[id]?.parser = parser
+            peers[id]?.lastSeen = Date()
         } else {
             pendingParsers[endpoint] = parser
         }
@@ -313,11 +473,18 @@ public final class PeerMesh: @unchecked Sendable {
             switch msg {
             case .hello(let h):
                 // Update existing peer's host claim if we already know them
-                if peers[h.senderId] != nil {
+                if let existing = peers[h.senderId] {
                     let newHost = h.host ?? false
-                    if peers[h.senderId]!.isHost != newHost {
+                    if existing.isHost != newHost {
                         peers[h.senderId]!.isHost = newHost
                         notifyChange()
+                    }
+                    // Duplicate connection from a racing dial — cancel the new one.
+                    if existing.connection !== conn && existing.connection.endpoint != conn.endpoint {
+                        Log.mesh.info("hello collision for \(h.senderId, privacy: .public) — keeping older conn, cancelling new")
+                        conn.cancel()
+                        pendingByEndpoint.removeValue(forKey: conn.endpoint)
+                        pendingParsers.removeValue(forKey: conn.endpoint)
                     }
                 } else if h.senderId != senderId {
                     if kicked.contains(h.senderId) {
@@ -355,8 +522,41 @@ public final class PeerMesh: @unchecked Sendable {
                     delegate?.peerMesh(self, received: msg, from: id)
                     removePeer(id: id)
                 }
+            case .ping(let p):
+                guard let id = existingPeerId ?? peerId(forEndpoint: endpoint) else { continue }
+                let t1 = Int64(Date().timeIntervalSince1970 * 1000)
+                let t2 = Int64(Date().timeIntervalSince1970 * 1000)
+                let reply = SyncMessage.pong(PongMessage(senderId: senderId, nonce: p.nonce, t0: p.t0, t1: t1, t2: t2))
+                if let data = try? JSONEncoder().encode(reply) {
+                    let frame = FrameCodec.encode(data)
+                    peers[id]?.connection.send(content: frame, completion: .contentProcessed { _ in })
+                }
+            case .pong(let p):
+                guard let id = existingPeerId ?? peerId(forEndpoint: endpoint),
+                      var pc = peers[id],
+                      let nonce = pc.lastPingNonce, nonce == p.nonce,
+                      let sentAt = pc.lastPingAt else { continue }
+                let rttMs = Int(Date().timeIntervalSince(sentAt) * 1000)
+                pc.lastPongMs = rttMs
+                pc.lastPingNonce = nil
+                pc.lastPingAt = nil
+                let t3 = Int64(Date().timeIntervalSince1970 * 1000)
+                pc.clockSync.recordSample(t0: p.t0, t1: p.t1, t2: p.t2, t3: t3)
+                peers[id] = pc
             }
         }
+    }
+
+    /// Pure decision: when a hello arrives for a peer we already track,
+    /// should we replace the existing connection or keep it?
+    /// Returns true if the new connection should replace the old one.
+    internal static func shouldReplaceExistingPeer(
+        existingConnectedAt: Date,
+        newHelloAt: Date
+    ) -> Bool {
+        // Always keep the older connection. New hellos for known peers
+        // are duplicates from a racing dial — drop the new one.
+        return false
     }
 
     private func peerId(forEndpoint endpoint: NWEndpoint) -> String? {
@@ -379,6 +579,51 @@ public final class PeerMesh: @unchecked Sendable {
         pendingParsers.removeValue(forKey: conn.endpoint)
     }
 
+    private func startLivenessLoop() {
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        t.schedule(deadline: .now() + .seconds(5), repeating: .seconds(5))
+        t.setEventHandler { [weak self] in self?.tickLiveness() }
+        t.resume()
+        livenessTimer = t
+    }
+
+    private func tickLiveness() {
+        let now = Date()
+        var toDrop: [String] = []
+        for (id, var pc) in peers {
+            let action = MeshPolicy.livenessAction(
+                now: now,
+                lastSeen: pc.lastSeen,
+                lastPingSent: pc.lastPingSent,
+                pingIntervalS: 10,
+                deadAfterS: 25
+            )
+            switch action {
+            case .idle:
+                break
+            case .sendPing:
+                nonceCounter &+= 1
+                pc.lastPingSent = now
+                pc.lastPingAt = now
+                pc.lastPingNonce = nonceCounter
+                peers[id] = pc
+                let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+                let msg = SyncMessage.ping(PingMessage(senderId: senderId, nonce: nonceCounter, t0: nowMs))
+                if let data = try? JSONEncoder().encode(msg) {
+                    pc.connection.send(content: FrameCodec.encode(data), completion: .contentProcessed { _ in })
+                }
+            case .dropDead:
+                pingTimeoutCount += 1
+                toDrop.append(id)
+            }
+        }
+        for id in toDrop {
+            if let pc = peers[id] { pc.connection.cancel() }
+            Log.mesh.info("dropping silent peer \(id, privacy: .public)")
+            removePeer(id: id)
+        }
+    }
+
     private func removePeer(id: String) {
         peers.removeValue(forKey: id)
         Log.mesh.info("peer removed: \(id, privacy: .public)")
@@ -398,6 +643,79 @@ public final class PeerMesh: @unchecked Sendable {
 
         let snap = (connected, disc, room)
         delegate?.peerMesh(self, peersChanged: snap.0, discovered: snap.1, room: snap.2)
+    }
+
+    private func startPathMonitor() {
+        let m = NWPathMonitor()
+        m.pathUpdateHandler = { [weak self] path in
+            self?.queue.async { self?.handlePathUpdate(path) }
+        }
+        m.start(queue: queue)
+        pathMonitor = m
+    }
+
+    private func handlePathUpdate(_ path: NWPath) {
+        lastPathStatus = String(describing: path.status)
+        lastPathInterface = path.availableInterfaces.first.map { "\($0.type)" }
+
+        switch path.status {
+        case .satisfied:
+            if unsatisfiedSince != nil {
+                unsatisfiedSince = nil
+                Log.mesh.info("path recovered — restarting mesh")
+                fullMeshRestart(reason: "path-recovered")
+            }
+            if let last = lastPath, last.availableInterfaces != path.availableInterfaces {
+                fullMeshRestart(reason: "interface-changed")
+            }
+        case .unsatisfied:
+            if unsatisfiedSince == nil {
+                unsatisfiedSince = Date()
+            }
+        default:
+            break
+        }
+        lastPath = path
+    }
+
+    private func fullMeshRestart(reason: String) {
+        pathRestartCount += 1
+        Log.mesh.info("full mesh restart (\(reason, privacy: .public))")
+        stopping = true
+        listener?.cancel()
+        browser?.cancel()
+        for (_, p) in peers { p.connection.cancel() }
+        peers.removeAll()
+        for (_, c) in pendingByEndpoint { c.cancel() }
+        pendingByEndpoint.removeAll()
+        pendingParsers.removeAll()
+        discovered.removeAll()
+        queue.asyncAfter(deadline: .now() + .milliseconds(500)) { [weak self] in
+            guard let self else { return }
+            self.stopping = false
+            self.startListener()
+            self.startBrowser()
+            self.notifyChange()
+        }
+    }
+
+    private func startWakeSleepObservers() {
+        let nc = NSWorkspace.shared.notificationCenter
+        wakeObserver = nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.queue.async { self?.fullMeshRestart(reason: "wake") }
+        }
+        sleepObserver = nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                let bye = SyncMessage.bye(ByeMessage(senderId: self.senderId))
+                if let data = try? JSONEncoder().encode(bye) {
+                    let frame = FrameCodec.encode(data)
+                    for (_, p) in self.peers {
+                        p.connection.send(content: frame, completion: .contentProcessed { _ in })
+                    }
+                }
+            }
+        }
     }
 
     /// Re-broadcasts hello to every connected peer. Call after toggling

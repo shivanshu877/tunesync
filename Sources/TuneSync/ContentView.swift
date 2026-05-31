@@ -13,6 +13,8 @@ public final class AppRuntime: ObservableObject {
     @Published public var lastLocalState: PlayerState?
     @Published public var syncHistory: [SyncEntry] = []
     @Published public var role: Role = .unset
+    @Published public var meshDiagnostics: MeshDiagnostics = .empty
+    @Published public var bridgedClientCount: Int = 0
 
     /// Wall-clock (ms since epoch) when the next scheduled play will
     /// fire. Nil when nothing is scheduled (the steady state).
@@ -34,16 +36,27 @@ public final class AppRuntime: ObservableObject {
     public let mesh: PeerMesh
     public let updater = Updater()
 
-    private var bridge: MeshBridge?
+    private var meshBridge: MeshBridge?
+    private let webBridgeBox = WebBridgeBox()
+    private var webBridge: Bridge? {
+        get { webBridgeBox.bridge }
+        set { webBridgeBox.bridge = newValue }
+    }
+    private var bridgeRelay: BridgeRelay?
+    private var diagPollTimer: Timer?
 
     public init() {
         let id = UUID().uuidString
         let name = Host.current().localizedName ?? "Mac"
 
         let mesh = PeerMesh(senderId: id, displayName: name, room: "default")
+        let webBridgeBox = self.webBridgeBox
         let engine = SyncEngine(
             senderId: id,
-            broadcast: { [weak mesh] msg in mesh?.broadcast(msg) },
+            broadcast: { [weak mesh] msg in
+                mesh?.broadcast(msg)
+                webBridgeBox.bridge?.broadcastToClients(msg)
+            },
             applyState: { _, _ in }
         )
 
@@ -81,25 +94,40 @@ public final class AppRuntime: ObservableObject {
             DispatchQueue.main.async { self.syncHistory = snap }
         }
 
-        let bridge = MeshBridge(owner: self)
-        self.bridge = bridge
-        self.mesh.delegate = bridge
+        let meshBridge = MeshBridge(owner: self)
+        self.meshBridge = meshBridge
+        self.mesh.delegate = meshBridge
+    }
+
+    public func startDiagPolling() {
+        diagPollTimer?.invalidate()
+        diagPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let snap = self.mesh.currentDiagnostics()
+            DispatchQueue.main.async { self.meshDiagnostics = snap }
+        }
     }
 
     public func start() {
         engine.start()
         mesh.start()
+        startDiagPolling()
         updater.startPeriodicChecks()
     }
 
     public func stop() {
         engine.stop()
         mesh.stop()
+        webBridge?.stop()
+        webBridge = nil
         updater.stop()
     }
 
     public func changeRoom(_ name: String) {
         mesh.setRoom(name)
+        webBridge?.stop()
+        webBridge = nil
+        bridgedClientCount = 0
     }
 
     public func kickPeer(_ senderId: String) {
@@ -118,8 +146,6 @@ public final class AppRuntime: ObservableObject {
     }
 
     public func stepDown() {
-        // If a remote peer is currently host, demote ourselves to guest;
-        // otherwise revert to unset (no host in the room).
         let remoteHost = connectedPeers.first(where: { $0.isHost })
         role = (remoteHost != nil) ? .guest : .unset
         engine.role = role
@@ -127,9 +153,6 @@ public final class AppRuntime: ObservableObject {
         mesh.reannounce()
     }
 
-    /// Auto-demote ourselves to guest if a remote peer claims host while
-    /// we don't (or if a remote peer with a smaller senderId also claims
-    /// host alongside us — tiebreak prevents both from heartbeating).
     fileprivate func reconcileRole() {
         let remoteHosts = connectedPeers.filter { $0.isHost }
         let remoteHost = remoteHosts.first
@@ -145,7 +168,6 @@ public final class AppRuntime: ObservableObject {
                 engine.role = .unset
             }
         case .host:
-            // Conflict: another peer also claims host. Lower senderId wins.
             if let other = remoteHosts.first(where: { $0.senderId < senderId }) {
                 Log.player.info("yielding host to \(other.senderId, privacy: .public) (lower senderId)")
                 role = .guest
@@ -160,8 +182,6 @@ public final class AppRuntime: ObservableObject {
         if case .state(let s) = message {
             DispatchQueue.main.async {
                 self.lastWriter = String(s.senderId.prefix(8))
-                // Capture network delay only on scheduled messages — that's
-                // when it matters for the countdown UI to display.
                 if let cms = s.clientMs, s.startAtMs != nil {
                     let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
                     self.networkDelayMs = max(0, nowMs - cms)
@@ -169,6 +189,12 @@ public final class AppRuntime: ObservableObject {
             }
         }
         engine.handleRemote(message)
+        webBridge?.broadcastToClients(message)
+    }
+
+    fileprivate func handleWebClientMessage(_ message: SyncMessage, fromClient id: String) {
+        engine.handleRemote(message)
+        mesh.broadcast(message)
     }
 
     fileprivate func peersChanged(_ connected: [ConnectedPeer], _ discovered: [DiscoveredPeer], room: String) {
@@ -177,8 +203,35 @@ public final class AppRuntime: ObservableObject {
             self.discoveredPeers = discovered
             self.currentRoom = room
             self.reconcileRole()
+            self.reconcileBridge()
         }
     }
+
+    private func reconcileBridge() {
+        let peerIds = connectedPeers.map { $0.senderId }
+        let shouldRun = BridgeElection.shouldBridge(localId: senderId, peerIds: peerIds)
+        if shouldRun && webBridge == nil {
+            let b = Bridge(port: 8732, room: currentRoom)
+            if bridgeRelay == nil { bridgeRelay = BridgeRelay(owner: self) }
+            b.delegate = bridgeRelay
+            do {
+                try b.start()
+                webBridge = b
+                Log.player.info("web bridge started on :8732")
+            } catch {
+                Log.player.error("web bridge start failed: \(error.localizedDescription, privacy: .public)")
+            }
+        } else if !shouldRun && webBridge != nil {
+            webBridge?.stop()
+            webBridge = nil
+            bridgedClientCount = 0
+            Log.player.info("web bridge stopped (lost election)")
+        }
+    }
+}
+
+final class WebBridgeBox: @unchecked Sendable {
+    var bridge: Bridge?
 }
 
 final class MeshBridge: PeerMeshDelegate, @unchecked Sendable {
@@ -196,9 +249,24 @@ final class MeshBridge: PeerMeshDelegate, @unchecked Sendable {
     }
 }
 
+private final class BridgeRelay: BridgeDelegate, @unchecked Sendable {
+    weak var owner: AppRuntime?
+    init(owner: AppRuntime) { self.owner = owner }
+    func bridge(_ bridge: Bridge, didReceive message: SyncMessage, fromClient id: String) {
+        let ownerRef = owner
+        Task { @MainActor in ownerRef?.handleWebClientMessage(message, fromClient: id) }
+    }
+    func bridge(_ bridge: Bridge, clientsChanged count: Int) {
+        let ownerRef = owner
+        Task { @MainActor in ownerRef?.bridgedClientCount = count }
+    }
+}
+
 public struct ContentView: View {
     @ObservedObject var rt: AppRuntime
     @State private var showSidebar: Bool = false
+    @State private var searchQuery: String = ""
+    @State private var showImportSheet: Bool = false
 
     public init(rt: AppRuntime) {
         self.rt = rt
@@ -207,6 +275,8 @@ public struct ContentView: View {
     public var body: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
+                searchBar
+                Divider()
                 ZStack {
                     WebViewHost(player: rt.player)
                         .frame(minWidth: 800, minHeight: 600)
@@ -217,7 +287,8 @@ public struct ContentView: View {
                     peerCount: .init(get: { rt.peerCount }, set: { _ in }),
                     lastWriter: .init(get: { rt.lastWriter }, set: { _ in }),
                     adShowing: .init(get: { rt.adShowing }, set: { _ in }),
-                    room: .init(get: { rt.currentRoom }, set: { _ in })
+                    room: .init(get: { rt.currentRoom }, set: { _ in }),
+                    bridgedClients: .init(get: { rt.bridgedClientCount }, set: { _ in })
                 )
             }
             if showSidebar {
@@ -228,6 +299,12 @@ public struct ContentView: View {
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
+                Button { showImportSheet = true } label: {
+                    Label("Import session", systemImage: "key.fill")
+                }
+                .help("Import a YouTube Music session from another browser")
+            }
+            ToolbarItem(placement: .primaryAction) {
                 Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showSidebar.toggle() } }) {
                     Label(showSidebar ? "Hide Peers" : "Show Peers",
                           systemImage: showSidebar ? "sidebar.right" : "person.2")
@@ -235,7 +312,37 @@ public struct ContentView: View {
                 .help(showSidebar ? "Hide Connection Manager" : "Show Connection Manager")
             }
         }
+        .sheet(isPresented: $showImportSheet) {
+            CookieImportSheet(rt: rt)
+        }
         .onAppear { rt.start() }
         .onDisappear { rt.stop() }
+    }
+
+    private var searchBar: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundColor(.secondary)
+            TextField("Search YouTube Music…", text: $searchQuery, onCommit: submitSearch)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+            if !searchQuery.isEmpty {
+                Button(action: { searchQuery = "" }) {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                }
+                .buttonStyle(.borderless)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.windowBackgroundColor))
+    }
+
+    private func submitSearch() {
+        let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
+        let encoded = q.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? q
+        if let url = URL(string: "https://music.youtube.com/search?q=\(encoded)") {
+            rt.player.navigate(to: url)
+        }
     }
 }

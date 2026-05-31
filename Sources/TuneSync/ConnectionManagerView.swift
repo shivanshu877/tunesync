@@ -182,6 +182,19 @@ public struct ConnectionManagerView: View {
     private var diagnosticsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionLabel("DIAGNOSTICS")
+            let d = rt.meshDiagnostics
+            diagRow("Listener", d.listenerState)
+            diagRow("Browser", d.browserState)
+            diagRow("Path", "\(d.pathStatus)\(d.interface.map { " (\($0))" } ?? "")")
+            diagRow("Restarts", "L:\(d.listenerRestarts) B:\(d.browserRestarts) P:\(d.pathRestarts)")
+            diagRow("Ping timeouts", "\(d.pingTimeouts)")
+            diagRow("Bridge", "\(rt.bridgedClientCount) web client\(rt.bridgedClientCount == 1 ? "" : "s")")
+            ForEach(d.peers, id: \.senderId) { p in
+                let rtt = p.rttMs > 0 ? "\(p.rttMs)ms" : (p.lastPongMs.map { "\($0)ms" } ?? "—")
+                let off = "\(p.offsetMs)ms"
+                let dur = Int(p.connDurationS)
+                diagRow(String(p.senderId.prefix(8)), "rtt:\(rtt) off:\(off) up:\(dur)s")
+            }
 
             // My current state
             VStack(alignment: .leading, spacing: 4) {
@@ -201,13 +214,13 @@ public struct ConnectionManagerView: View {
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
                 }
-                if let d = rt.lastDiag {
-                    if let why = d.skipped {
+                if let diag = rt.lastDiag {
+                    if let why = diag.skipped {
                         Text("JS skipped last report: \(why)")
                             .font(.system(size: 10))
                             .foregroundColor(.orange)
                     }
-                    if d.ad == true {
+                    if diag.ad == true {
                         Text("Ad detected — outbound suppressed")
                             .font(.system(size: 10))
                             .foregroundColor(.orange)
@@ -238,6 +251,14 @@ public struct ConnectionManagerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.black.opacity(0.04))
             .cornerRadius(6)
+        }
+    }
+
+    private func diagRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).font(.caption).foregroundColor(.secondary)
+            Spacer()
+            Text(value).font(.system(.caption, design: .monospaced))
         }
     }
 

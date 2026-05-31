@@ -66,10 +66,44 @@ public struct ByeMessage: Codable, Equatable, Sendable {
     }
 }
 
+public struct PingMessage: Codable, Equatable, Sendable {
+    public let senderId: String
+    public let nonce: Int64
+    /// Sender wallclock (ms) when this ping was encoded.
+    public let t0: Int64
+
+    public init(senderId: String, nonce: Int64, t0: Int64 = 0) {
+        self.senderId = senderId
+        self.nonce = nonce
+        self.t0 = t0
+    }
+}
+
+public struct PongMessage: Codable, Equatable, Sendable {
+    public let senderId: String
+    public let nonce: Int64
+    /// Echoed from the originating ping.
+    public let t0: Int64
+    /// Receiver wallclock (ms) at receive.
+    public let t1: Int64
+    /// Receiver wallclock (ms) at send.
+    public let t2: Int64
+
+    public init(senderId: String, nonce: Int64, t0: Int64 = 0, t1: Int64 = 0, t2: Int64 = 0) {
+        self.senderId = senderId
+        self.nonce = nonce
+        self.t0 = t0
+        self.t1 = t1
+        self.t2 = t2
+    }
+}
+
 public enum SyncMessage: Codable, Equatable, Sendable {
     case state(StateMessage)
     case hello(HelloMessage)
     case bye(ByeMessage)
+    case ping(PingMessage)
+    case pong(PongMessage)
 
     public func stateOrNil() -> StateMessage? {
         if case .state(let s) = self { return s }
@@ -77,7 +111,7 @@ public enum SyncMessage: Codable, Equatable, Sendable {
     }
 
     private enum Kind: String, Codable {
-        case state, hello, bye
+        case state, hello, bye, ping, pong
     }
 
     private enum Keys: String, CodingKey {
@@ -91,6 +125,8 @@ public enum SyncMessage: Codable, Equatable, Sendable {
         case .state: self = .state(try StateMessage(from: decoder))
         case .hello: self = .hello(try HelloMessage(from: decoder))
         case .bye:   self = .bye(try ByeMessage(from: decoder))
+        case .ping:  self = .ping(try PingMessage(from: decoder))
+        case .pong:  self = .pong(try PongMessage(from: decoder))
         }
     }
 
@@ -105,6 +141,12 @@ public enum SyncMessage: Codable, Equatable, Sendable {
             try m.encode(to: encoder)
         case .bye(let m):
             try c.encode(Kind.bye, forKey: .kind)
+            try m.encode(to: encoder)
+        case .ping(let m):
+            try c.encode(Kind.ping, forKey: .kind)
+            try m.encode(to: encoder)
+        case .pong(let m):
+            try c.encode(Kind.pong, forKey: .kind)
             try m.encode(to: encoder)
         }
     }
