@@ -6,3 +6,7 @@ DerivedData/
 *.app/
 TuneSync.app/
 *.dmg
+
+# Local build/test logs
+build_output.txt
+test_output.txt
