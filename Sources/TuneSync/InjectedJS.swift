@@ -141,11 +141,34 @@ enum InjectedJS {
   // Pending scheduled-play timer handle, so we can cancel it if a newer
   // state supersedes (e.g., user pauses before the scheduled play fires).
   var pendingPlayTimeout = null;
+  // While a scheduled play is armed, YT Music's own player layer may try
+  // to re-issue v.play() (its UI thinks the song is playing). We install
+  // a defensive "play" listener that immediately re-pauses during the
+  // wait window. Cleared the instant the schedule fires.
+  var scheduleHoldHandler = null;
+  function installScheduleHold() {
+    var v = getVideo();
+    if (!v || scheduleHoldHandler) return;
+    scheduleHoldHandler = function () {
+      // Still inside the schedule window — squash the play immediately.
+      try { v.pause(); } catch (e) {}
+    };
+    v.addEventListener("play", scheduleHoldHandler, true);
+  }
+  function releaseScheduleHold() {
+    if (!scheduleHoldHandler) return;
+    var v = getVideo();
+    if (v) {
+      try { v.removeEventListener("play", scheduleHoldHandler, true); } catch (e) {}
+    }
+    scheduleHoldHandler = null;
+  }
   function cancelPending() {
     if (pendingPlayTimeout !== null) {
       clearTimeout(pendingPlayTimeout);
       pendingPlayTimeout = null;
     }
+    releaseScheduleHold();
   }
 
   window.tunesyncApplyState = function (videoId, t, playing, startAtMs) {
@@ -174,8 +197,13 @@ enum InjectedJS {
         // wait window), then arm the timer. All peers do this in
         // lockstep; both fire v.play() at the same wall-clock instant.
         try { if (!v.paused) v.pause(); } catch (e) {}
+        // Hold against YT Music's player layer re-issuing play() during
+        // the wait window — without this guard, the music kept playing
+        // even though the countdown overlay was up.
+        installScheduleHold();
         pendingPlayTimeout = setTimeout(function () {
           pendingPlayTimeout = null;
+          releaseScheduleHold();
           var vv = getVideo();
           if (vv && vv.paused) { vv.play().catch(function () {}); }
         }, delay);
