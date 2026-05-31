@@ -57,7 +57,10 @@ public final class AppRuntime: ObservableObject {
                 mesh?.broadcast(msg)
                 webBridgeBox.bridge?.broadcastToClients(msg)
             },
-            applyState: { _, _ in }
+            applyState: { _, _ in },
+            clockOffsetMsFor: { [weak mesh] sid in
+                mesh?.peerOffsetMs(senderId: sid) ?? 0
+            }
         )
 
         self.engine = engine
