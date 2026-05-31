@@ -188,15 +188,21 @@ public final class SyncEngine: @unchecked Sendable {
             // future), don't apply latency comp — the schedule itself
             // handles inter-Mac alignment by virtue of all peers waiting
             // for the same wall-clock instant.
+            //
+            // Convert the host's wall-clock `startAtMs` into our local clock
+            // frame using the per-peer NTP-style offset. Subtract because
+            // `clockOffsetMsFor` returns (their_clock − our_clock) ms.
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-            let isScheduled = (s.startAtMs ?? 0) > nowMs
+            let offsetMs = Int64(clockOffsetMsFor(s.senderId))
+            let localStartAt: Int64 = (s.startAtMs ?? 0) - offsetMs
+            let isScheduled = localStartAt > nowMs
 
             // Suppress local rebroadcasts until *after* the scheduled play
             // actually fires. Without this, the play event triggered by the
             // scheduled timer re-enters flushDebounce and schedules another
             // 3-second countdown — overlay re-appears in a loop.
-            if isScheduled, let startAt = s.startAtMs {
-                let until = Date(timeIntervalSince1970: Double(startAt) / 1000.0)
+            if isScheduled {
+                let until = Date(timeIntervalSince1970: Double(localStartAt) / 1000.0)
                     .addingTimeInterval(0.75)
                 suppressUntil = max(suppressUntil, until)
             } else {
@@ -215,13 +221,13 @@ public final class SyncEngine: @unchecked Sendable {
                     }
                 }
             } else if isScheduled {
-                let inMs = (s.startAtMs ?? 0) - nowMs
-                compNote = "scheduled +\(inMs)ms"
+                let inMs = localStartAt - nowMs
+                compNote = "scheduled +\(inMs)ms (offset \(offsetMs)ms)"
             }
 
             applyStateImpl(
                 PlayerState(videoId: s.videoId, t: effectiveT, playing: s.playing),
-                isScheduled ? s.startAtMs : nil
+                isScheduled ? localStartAt : nil
             )
             appendHistory(SyncEntry(
                 direction: .applied, senderId: s.senderId,

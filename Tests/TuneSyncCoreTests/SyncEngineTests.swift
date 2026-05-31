@@ -400,4 +400,39 @@ final class SyncEngineTests: XCTestCase {
         XCTAssertEqual(r.applies.count, 1)
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
     }
+
+    func testScheduledPlayHonorsClockOffset() {
+        // Peer's clock is 2000 ms ahead of ours. Their `startAtMs = nowMs + 500`
+        // translates to localStartAt = nowMs - 1500 (already in our past) → must
+        // NOT be treated as scheduled.
+        let r = Recorder()
+        let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in 2000 })
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs,
+            startAtMs: nowMs + 500
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertNil(r.appliesScheduledAt[0],
+            "peer 2s ahead means their +500ms schedule lies in our past — apply now, not scheduled")
+
+        // Same peer, but `startAtMs = nowMs + 2500` → localStartAt = nowMs + 500 → scheduled.
+        let r2 = Recorder()
+        let e2 = makeEngine(recorder: r2, clockOffsetMsFor: { _ in 2000 })
+        let now2 = Int64(Date().timeIntervalSince1970 * 1000)
+        e2.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: now2,
+            startAtMs: now2 + 2500
+        )))
+        XCTAssertEqual(r2.applies.count, 1)
+        XCTAssertNotNil(r2.appliesScheduledAt[0])
+        // Forwarded value is in OUR clock frame, not the host's.
+        let forwarded = r2.appliesScheduledAt[0]!
+        XCTAssertTrue(abs(forwarded - (now2 + 2500 - 2000)) <= 50,
+            "forwarded startAtMs must be host's startAtMs minus the offset (got \(forwarded))")
+    }
 }
