@@ -16,6 +16,14 @@ public final class AppRuntime: ObservableObject {
     @Published public var meshDiagnostics: MeshDiagnostics = .empty
     @Published public var bridgedClientCount: Int = 0
 
+    /// Wall-clock (ms since epoch) when the next scheduled play will
+    /// fire. Nil when nothing is scheduled (the steady state).
+    @Published public var scheduledAtMs: Int64?
+    /// How late this Mac received the scheduled message — only meaningful
+    /// when scheduledAtMs is set. Helps the user understand whether their
+    /// network is the slow link in the room.
+    @Published public var networkDelayMs: Int64 = 0
+
     public var peerCount: Int { connectedPeers.count }
     public var senderId: String { engine.senderId }
     public var hostDisplayName: String? {
@@ -42,8 +50,6 @@ public final class AppRuntime: ObservableObject {
         let name = Host.current().localizedName ?? "Mac"
 
         let mesh = PeerMesh(senderId: id, displayName: name, room: "default")
-        // Capture webBridgeBox (already allocated) so the closure can reach webBridge
-        // before `self` is fully initialised.
         let webBridgeBox = self.webBridgeBox
         let engine = SyncEngine(
             senderId: id,
@@ -51,19 +57,23 @@ public final class AppRuntime: ObservableObject {
                 mesh?.broadcast(msg)
                 webBridgeBox.bridge?.broadcastToClients(msg)
             },
-            applyState: { _ in }
+            applyState: { _, _ in }
         )
 
         self.engine = engine
         self.mesh = mesh
 
-        self.engine.peerOffsetLookup = { [weak mesh] senderId in
-            mesh?.peerOffsetMs(senderId: senderId)
-        }
-
-        self.engine.applyStateExtended = { [weak self] state, atMs, adOnHost in
+        self.engine.applyStateOverride { [weak self] state, startAtMs in
             DispatchQueue.main.async {
-                self?.player.applyState(state, applyAtMs: atMs, adOnHost: adOnHost)
+                guard let self else { return }
+                self.player.applyState(state, startAtMs: startAtMs)
+                let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                if let s = startAtMs, s > nowMs, state.playing {
+                    self.scheduledAtMs = s
+                } else {
+                    self.scheduledAtMs = nil
+                    self.networkDelayMs = 0
+                }
             }
         }
 
@@ -136,8 +146,6 @@ public final class AppRuntime: ObservableObject {
     }
 
     public func stepDown() {
-        // If a remote peer is currently host, demote ourselves to guest;
-        // otherwise revert to unset (no host in the room).
         let remoteHost = connectedPeers.first(where: { $0.isHost })
         role = (remoteHost != nil) ? .guest : .unset
         engine.role = role
@@ -145,9 +153,6 @@ public final class AppRuntime: ObservableObject {
         mesh.reannounce()
     }
 
-    /// Auto-demote ourselves to guest if a remote peer claims host while
-    /// we don't (or if a remote peer with a smaller senderId also claims
-    /// host alongside us — tiebreak prevents both from heartbeating).
     fileprivate func reconcileRole() {
         let remoteHosts = connectedPeers.filter { $0.isHost }
         let remoteHost = remoteHosts.first
@@ -163,7 +168,6 @@ public final class AppRuntime: ObservableObject {
                 engine.role = .unset
             }
         case .host:
-            // Conflict: another peer also claims host. Lower senderId wins.
             if let other = remoteHosts.first(where: { $0.senderId < senderId }) {
                 Log.player.info("yielding host to \(other.senderId, privacy: .public) (lower senderId)")
                 role = .guest
@@ -176,7 +180,13 @@ public final class AppRuntime: ObservableObject {
 
     fileprivate func received(_ message: SyncMessage, from peerId: String) {
         if case .state(let s) = message {
-            DispatchQueue.main.async { self.lastWriter = String(s.senderId.prefix(8)) }
+            DispatchQueue.main.async {
+                self.lastWriter = String(s.senderId.prefix(8))
+                if let cms = s.clientMs, s.startAtMs != nil {
+                    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+                    self.networkDelayMs = max(0, nowMs - cms)
+                }
+            }
         }
         engine.handleRemote(message)
         webBridge?.broadcastToClients(message)
@@ -267,8 +277,12 @@ public struct ContentView: View {
             VStack(spacing: 0) {
                 searchBar
                 Divider()
-                WebViewHost(player: rt.player)
-                    .frame(minWidth: 800, minHeight: 600)
+                ZStack {
+                    WebViewHost(player: rt.player)
+                        .frame(minWidth: 800, minHeight: 600)
+                    CountdownOverlay(rt: rt)
+                        .allowsHitTesting(false)
+                }
                 StatusBar(
                     peerCount: .init(get: { rt.peerCount }, set: { _ in }),
                     lastWriter: .init(get: { rt.lastWriter }, set: { _ in }),

@@ -63,10 +63,10 @@ final class ModelsTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(SyncMessage.self, from: bogus))
     }
 
-    func testStateMessageWithApplyAtRoundTrip() throws {
+    func testStateMessageWithStartAtMsRoundTrip() throws {
         let original = SyncMessage.state(StateMessage(
             senderId: "A", ts: 1, videoId: "vid", t: 12.5, playing: true,
-            clientMs: 100, host: true, applyAtMs: 400, adOnHost: false
+            clientMs: 100, host: true, startAtMs: 400
         ))
         let data = try JSONEncoder().encode(original)
         let decoded = try JSONDecoder().decode(SyncMessage.self, from: data)

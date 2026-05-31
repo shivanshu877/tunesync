@@ -138,58 +138,58 @@ enum InjectedJS {
     });
   }
 
-  window.tunesyncApplyState = function (videoId, t, playing, atMs, adOnHost) {
+  // Pending scheduled-play timer handle, so we can cancel it if a newer
+  // state supersedes (e.g., user pauses before the scheduled play fires).
+  var pendingPlayTimeout = null;
+  function cancelPending() {
+    if (pendingPlayTimeout !== null) {
+      clearTimeout(pendingPlayTimeout);
+      pendingPlayTimeout = null;
+    }
+  }
+
+  window.tunesyncApplyState = function (videoId, t, playing, startAtMs) {
     var v = getVideo();
     if (!v) return false;
     var current = getVideoId();
-    var changed = false;
-
-    // Ad-on-host: pause + mute regardless of other params.
-    if (adOnHost) {
-        if (!v.muted) { v.muted = true; }
-        if (!v.paused) { v.pause(); }
-        lastAppliedAt = Date.now();
-        return true;
-    } else {
-        if (v.muted) { v.muted = false; }
-    }
 
     if (videoId && videoId !== current) {
-        lastAppliedAt = Date.now();
-        lastAppliedVideoId = videoId;
-        var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
-        window.location.href = dest;
-        return true;
+      lastAppliedAt = Date.now();
+      lastAppliedVideoId = videoId;
+      var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
+      window.location.href = dest;
+      return true;
     }
 
-    function doApply() {
-        var diff = (typeof t === "number") ? (v.currentTime || 0) - t : 0;
-        var absDiff = Math.abs(diff);
-        if (absDiff > 0.5) {
-            try { v.currentTime = t; changed = true; } catch (e) {}
-            v.playbackRate = 1.0;
-        } else if (absDiff > 0.05) {
-            v.playbackRate = (diff > 0) ? 0.98 : 1.02;
-            setTimeout(function () { v.playbackRate = 1.0; }, Math.max(200, absDiff * 1000 * 50));
-        } else {
-            v.playbackRate = 1.0;
-        }
-        if (playing && v.paused) { v.play().catch(function () {}); changed = true; }
-        if (!playing && !v.paused) { v.pause(); changed = true; }
-        if (changed) {
-            lastAppliedAt = Date.now();
-            lastAppliedVideoId = videoId || current;
-        }
+    if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 1.0) {
+      try { v.currentTime = t; } catch (e) {}
     }
 
-    if (typeof atMs === "number" && atMs !== null) {
-        var wait = atMs - Date.now();
-        if (wait > 0 && wait < 1000) {
-            setTimeout(doApply, wait);
-            return true;
-        }
+    cancelPending();
+
+    if (playing) {
+      var delay = (typeof startAtMs === "number") ? (startAtMs - Date.now()) : 0;
+      if (delay > 0) {
+        // Scheduled play: pre-pause now (so we don't "play through" the
+        // wait window), then arm the timer. All peers do this in
+        // lockstep; both fire v.play() at the same wall-clock instant.
+        try { if (!v.paused) v.pause(); } catch (e) {}
+        pendingPlayTimeout = setTimeout(function () {
+          pendingPlayTimeout = null;
+          var vv = getVideo();
+          if (vv && vv.paused) { vv.play().catch(function () {}); }
+        }, delay);
+      } else {
+        // Either no schedule, or schedule already in the past — play now.
+        if (v.paused) { v.play().catch(function () {}); }
+      }
+    } else {
+      // Pause is always immediate.
+      if (!v.paused) v.pause();
     }
-    doApply();
+
+    lastAppliedAt = Date.now();
+    lastAppliedVideoId = videoId || current;
     return true;
   };
 
@@ -215,30 +215,7 @@ enum InjectedJS {
   // Periodic catch-up for slow drifts (e.g., user lets a song play untouched).
   setInterval(reportState, 5000);
 
-  // Sign-in nag hider. YT Music throws up a signin promo / popup container
-  // shortly after landing on the home page, even though playback works
-  // signed-out. We hide them as they appear so the user never sees a
-  // blocking dialog.
-  function hideSigninNag() {
-    var sels = [
-      "ytmusic-signin-prompt",
-      "ytmusic-popup-container",
-      "ytmusic-mealbar-promo-renderer",
-      "tp-yt-iron-overlay-backdrop",
-      "ytmusic-you-there-renderer"
-    ];
-    sels.forEach(function (sel) {
-      document.querySelectorAll(sel).forEach(function (el) {
-        el.style.setProperty("display", "none", "important");
-        el.setAttribute("aria-hidden", "true");
-      });
-    });
-  }
-  hideSigninNag();
-  var nagObserver = new MutationObserver(function () { hideSigninNag(); });
-  nagObserver.observe(document.documentElement, { childList: true, subtree: true });
-
-  console.info("[tunesync] injected (v0.2.10)");
+  console.info("[tunesync] injected (v0.2.8)");
 })();
 """#
 }
