@@ -1,5 +1,5 @@
 {
-  "version": "0.4.5",
-  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.4.5.dmg",
-  "notes": "- Merge pull request #5 from shivanshu877/fix/clock-offset-schedule\n- build: bump to 0.4.5\n- feat(sync): wire SyncEngine clock offset to PeerMesh per-peer estimate\n- fix(sync): treat nil startAtMs as never scheduled even with negative offset\n- fix(sync): convert remote startAtMs to local clock via per-peer offset\n- refactor(sync): plumb clockOffsetMsFor closure through SyncEngine init\n- docs: implementation plan for clock-offset-aware scheduled play\n- docs: spec for clock-offset-aware wall-clock scheduled play"
+  "version": "0.4.7",
+  "url": "https://shivanshu877.github.io/tunesync/TuneSync-0.4.7.dmg",
+  "notes": "- fix(sync): hold pause during schedule window + larger buffer (v0.4.7) (#6)"
 }
