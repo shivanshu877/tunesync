@@ -118,10 +118,27 @@ public final class Updater: ObservableObject {
         let alert = NSAlert()
         alert.messageText = "TuneSync \(manifest.version) is available"
         alert.informativeText =
-            (manifest.notes?.isEmpty == false ? manifest.notes! + "\n\n" : "")
-            + "You're on \(currentVersion). Click Download to grab the new DMG, then drag it into Applications."
+            "You're on \(currentVersion). Click Download to grab the new DMG, then drag it into Applications."
         alert.addButton(withTitle: "Download")
         alert.addButton(withTitle: "Later")
+
+        if let notes = manifest.notes, !notes.isEmpty {
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 420, height: 200))
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .bezelBorder
+            scroll.autohidesScrollers = false
+            let text = NSTextView(frame: scroll.bounds)
+            text.isEditable = false
+            text.isSelectable = true
+            text.drawsBackground = false
+            text.textContainerInset = NSSize(width: 6, height: 6)
+            text.font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize)
+            text.string = notes
+            text.autoresizingMask = [.width]
+            scroll.documentView = text
+            alert.accessoryView = scroll
+        }
+
         let response = alert.runModal()
         alertOpen = false
         if response == .alertFirstButtonReturn, let dmg = URL(string: manifest.url) {
