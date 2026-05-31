@@ -303,6 +303,32 @@ final class SyncEngineTests: XCTestCase {
             "play event after scheduled fire must stay suppressed — no second countdown")
     }
 
+    func testSteadyStatePlayingDoesNotRescheduleEvery5s() {
+        // Regression: the injected JS posts state every 5s while playing.
+        // If flushDebounce treats every playing=true as a transition, it
+        // re-arms a 3-second scheduled play, which pre-pauses the music in
+        // an infinite loop. Only the first transition should schedule.
+        let r = Recorder()
+        let e = makeEngine(recorder: r)
+
+        e.localStateChanged(PlayerState(videoId: "v", t: 0, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.broadcasts.count, 1, "first play broadcasts")
+        XCTAssertNotNil(r.broadcasts[0].stateOrNil()?.startAtMs, "first play is scheduled")
+
+        // Wait past suppressUntil window (startAt + 750ms grace) so the
+        // next localStateChanged isn't dropped by suppression — we want to
+        // verify the dedupe runs INSIDE flushDebounce too.
+        Thread.sleep(forTimeInterval: 4.0)
+
+        // JS periodic catch-up: re-posts playing=true with later t.
+        e.localStateChanged(PlayerState(videoId: "v", t: 5, playing: true))
+        e.flushDebounceForTesting()
+        XCTAssertEqual(r.broadcasts.count, 2, "steady-state ping still broadcasts")
+        XCTAssertNil(r.broadcasts[1].stateOrNil()?.startAtMs,
+            "steady-state play must NOT carry startAtMs — that would re-arm countdown loop")
+    }
+
     func testRemoteUnscheduledPlayStillUsesLatencyComp() {
         let r = Recorder()
         let e = makeEngine(recorder: r)

@@ -245,11 +245,12 @@ public final class SyncEngine: @unchecked Sendable {
             ))
             return
         }
-        // Schedule a coordinated start whenever the broadcast carries
-        // playing=true. Both peers (host and guest) wait for the same
-        // wall-clock instant before triggering v.play(). Pauses are
-        // not scheduled — they propagate immediately.
-        let scheduled = s.playing
+        // Schedule a coordinated start only on a paused→playing transition.
+        // Steady-state catch-up reports (JS posts state every 5s while
+        // playing) must NOT re-arm a scheduled play — that pre-pauses the
+        // music for another 3 seconds in a loop. Pauses propagate
+        // immediately.
+        let scheduled = s.playing && !lastBroadcastPlaying
         let msg = buildStateMessage(s, scheduled: scheduled)
         broadcast(msg)
 
