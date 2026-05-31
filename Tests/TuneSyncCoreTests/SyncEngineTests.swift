@@ -236,9 +236,9 @@ final class SyncEngineTests: XCTestCase {
         e.flushDebounceForTesting()
         guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
         XCTAssertNotNil(s.startAtMs)
-        // 800ms schedule buffer (default), allow ±300ms scheduler jitter
-        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 500)
-        XCTAssertLessThanOrEqual(s.startAtMs!, before + 1100)
+        // 2000ms schedule buffer (default), allow ±300ms scheduler jitter
+        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 1700)
+        XCTAssertLessThanOrEqual(s.startAtMs!, before + 2300)
     }
 
     func testLocalPauseBroadcastNoStartAtMs() {
