@@ -11,7 +11,8 @@ final class SyncEngineTests: XCTestCase {
 
     private func makeEngine(
         senderId: String = "self",
-        recorder: Recorder
+        recorder: Recorder,
+        clockOffsetMsFor: @escaping (String) -> Int = { _ in 0 }
     ) -> SyncEngine {
         return SyncEngine(
             senderId: senderId,
@@ -19,7 +20,8 @@ final class SyncEngineTests: XCTestCase {
             applyState: { state, startAtMs in
                 recorder.applies.append(state)
                 recorder.appliesScheduledAt.append(startAtMs)
-            }
+            },
+            clockOffsetMsFor: clockOffsetMsFor
         )
     }
 
@@ -234,9 +236,9 @@ final class SyncEngineTests: XCTestCase {
         e.flushDebounceForTesting()
         guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
         XCTAssertNotNil(s.startAtMs)
-        // 3-second schedule buffer (default), allow ±300ms scheduler jitter
-        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 2700)
-        XCTAssertLessThanOrEqual(s.startAtMs!, before + 3300)
+        // 800ms schedule buffer (default), allow ±300ms scheduler jitter
+        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 500)
+        XCTAssertLessThanOrEqual(s.startAtMs!, before + 1100)
     }
 
     func testLocalPauseBroadcastNoStartAtMs() {
@@ -397,5 +399,59 @@ final class SyncEngineTests: XCTestCase {
         )))
         XCTAssertEqual(r.applies.count, 1)
         XCTAssertEqual(r.applies[0].t, 10.0, accuracy: 0.001)
+    }
+
+    func testNilStartAtMsWithNegativeOffsetDoesNotScheduleFalsely() {
+        // Heartbeat-style message: startAtMs is nil. Peer clock is BEHIND
+        // ours (offsetMs negative). Old buggy math: (nil ?? 0) - (-X) = +X,
+        // which could flip isScheduled true and forward a bogus schedule.
+        // New math must treat nil as "not scheduled" regardless of offset.
+        let r = Recorder()
+        let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in -5_000_000_000_000 })
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs - 100
+            // startAtMs intentionally nil
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertNil(r.appliesScheduledAt[0],
+            "nil startAtMs must never schedule, regardless of clock offset sign")
+    }
+
+    func testScheduledPlayHonorsClockOffset() {
+        // Peer's clock is 2000 ms ahead of ours. Their `startAtMs = nowMs + 500`
+        // translates to localStartAt = nowMs - 1500 (already in our past) → must
+        // NOT be treated as scheduled.
+        let r = Recorder()
+        let e = makeEngine(recorder: r, clockOffsetMsFor: { _ in 2000 })
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        e.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: nowMs,
+            startAtMs: nowMs + 500
+        )))
+        XCTAssertEqual(r.applies.count, 1)
+        XCTAssertNil(r.appliesScheduledAt[0],
+            "peer 2s ahead means their +500ms schedule lies in our past — apply now, not scheduled")
+
+        // Same peer, but `startAtMs = nowMs + 2500` → localStartAt = nowMs + 500 → scheduled.
+        let r2 = Recorder()
+        let e2 = makeEngine(recorder: r2, clockOffsetMsFor: { _ in 2000 })
+        let now2 = Int64(Date().timeIntervalSince1970 * 1000)
+        e2.handleRemote(.state(StateMessage(
+            senderId: "peer", ts: 9_000_000_000_000,
+            videoId: "v", t: 10.0, playing: true,
+            clientMs: now2,
+            startAtMs: now2 + 2500
+        )))
+        XCTAssertEqual(r2.applies.count, 1)
+        XCTAssertNotNil(r2.appliesScheduledAt[0])
+        // Forwarded value is in OUR clock frame, not the host's.
+        let forwarded = r2.appliesScheduledAt[0]!
+        XCTAssertTrue(abs(forwarded - (now2 + 2500 - 2000)) <= 50,
+            "forwarded startAtMs must be host's startAtMs minus the offset (got \(forwarded))")
     }
 }
