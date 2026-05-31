@@ -194,15 +194,15 @@ public final class SyncEngine: @unchecked Sendable {
             // `clockOffsetMsFor` returns (their_clock − our_clock) ms.
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let offsetMs = Int64(clockOffsetMsFor(s.senderId))
-            let localStartAt: Int64 = (s.startAtMs ?? 0) - offsetMs
-            let isScheduled = localStartAt > nowMs
+            let localStartAt: Int64? = s.startAtMs.map { $0 - offsetMs }
+            let isScheduled: Bool = (localStartAt ?? 0) > nowMs
 
             // Suppress local rebroadcasts until *after* the scheduled play
             // actually fires. Without this, the play event triggered by the
             // scheduled timer re-enters flushDebounce and schedules another
             // 3-second countdown — overlay re-appears in a loop.
-            if isScheduled {
-                let until = Date(timeIntervalSince1970: Double(localStartAt) / 1000.0)
+            if isScheduled, let local = localStartAt {
+                let until = Date(timeIntervalSince1970: Double(local) / 1000.0)
                     .addingTimeInterval(0.75)
                 suppressUntil = max(suppressUntil, until)
             } else {
@@ -220,8 +220,8 @@ public final class SyncEngine: @unchecked Sendable {
                         compNote = "+\(totalMs)ms (\(networkMs)net + \(applyOverheadMs)apply)"
                     }
                 }
-            } else if isScheduled {
-                let inMs = localStartAt - nowMs
+            } else if isScheduled, let local = localStartAt {
+                let inMs = local - nowMs
                 compNote = "scheduled +\(inMs)ms (offset \(offsetMs)ms)"
             }
 
