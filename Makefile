@@ -2,10 +2,10 @@ APP        = TuneSync.app
 BIN        = .build/release/TuneSync
 PLIST      = $(APP)/Contents/Info.plist
 RES        = $(APP)/Contents/Resources
-DMG        = TuneSync-0.4.7.dmg
+DMG        = TuneSync-0.5.0.dmg
 DMG_STAGE  = .dmg-stage
 
-.PHONY: build bundle sign dmg run clean
+.PHONY: build bundle sign dmg run clean dev kill
 
 build:
 	swift build -c release
@@ -22,8 +22,8 @@ bundle: build
 '<key>CFBundleName</key><string>TuneSync</string>' \
 '<key>CFBundleDisplayName</key><string>TuneSync</string>' \
 '<key>CFBundleIdentifier</key><string>com.tunesync.app</string>' \
-'<key>CFBundleVersion</key><string>0.4.7</string>' \
-'<key>CFBundleShortVersionString</key><string>0.4.7</string>' \
+'<key>CFBundleVersion</key><string>0.5.0</string>' \
+'<key>CFBundleShortVersionString</key><string>0.5.0</string>' \
 '<key>CFBundleExecutable</key><string>TuneSync</string>' \
 '<key>CFBundlePackageType</key><string>APPL</string>' \
 '<key>LSMinimumSystemVersion</key><string>14.0</string>' \
@@ -59,6 +59,23 @@ dmg: sign
 
 run: bundle
 	open $(APP)
+
+# Fast iteration: kill any running dev instance, rebuild, relaunch, open
+# the web peer in the default browser. No DMG, no install, no PR.
+# Workflow: edit code -> `make dev` -> reload the browser tab.
+dev: bundle
+	@pkill -f "$$PWD/$(APP)/Contents/MacOS/TuneSync" 2>/dev/null; sleep 0.5; \
+	"$$PWD/$(APP)/Contents/MacOS/TuneSync" > /tmp/tunesync-dev.log 2>&1 & \
+	echo "dev pid=$$!"; sleep 1; \
+	open "http://localhost:8732/"
+	@echo ""
+	@echo "Native app + browser peer at http://localhost:8732/"
+	@echo "Logs:  tail -f /tmp/tunesync-dev.log"
+	@echo "Stop:  make kill"
+
+kill:
+	@pkill -f "$$PWD/$(APP)/Contents/MacOS/TuneSync" 2>/dev/null || true
+	@echo "killed dev instance"
 
 clean:
 	rm -rf $(APP) .build $(DMG) $(DMG_STAGE)

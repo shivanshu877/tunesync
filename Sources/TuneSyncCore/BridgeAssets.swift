@@ -102,59 +102,52 @@ main { padding: 16px; max-width: 720px; margin: 0 auto; }
     }
   }
 
+  // PLL-follower: compute host's current position in our local clock
+  // frame via clockOffsetMs (from ping/pong), then hard-seek (drift > 2s)
+  // / rate-bend (100ms..2s, ±0.5%) / lock (rate=1.0, ±100ms).
   function applyState(s) {
     if (!player || typeof player.loadVideoById !== 'function') return;
     if (s.adOnHost) {
-      player.mute();
-      player.pauseVideo();
+      try { player.mute(); player.pauseVideo(); } catch (e) {}
       return;
     } else {
-      player.unMute();
+      try { player.unMute(); } catch (e) {}
     }
 
-    // Pure wall-clock schedule model: the message carries `t` (playback
-    // position) and `startAtMs` (host wall-clock instant when every peer
-    // should hit play). No elapsed-time math — every peer just waits for
-    // the same instant and plays from the same `t`. Clock offset is
-    // measured via ping/pong; we convert host wall-clock → local clock
-    // with `localTarget = startAtMs - clockOffsetMs`.
-    var targetT = s.t || 0;
-    var scheduleMs = (typeof s.startAtMs === 'number') ? s.startAtMs : null;
+    var hostNow = Date.now() - clockOffsetMs;
+    var elapsedMs = (typeof s.clientMs === 'number') ? Math.max(0, hostNow - s.clientMs) : 0;
+    var targetT = (s.t || 0) + (s.playing ? elapsedMs / 1000 : 0);
 
     if (s.videoId && s.videoId !== lastVideoId) {
       lastVideoId = s.videoId;
-      player.loadVideoById(s.videoId, targetT);
+      try { player.loadVideoById(s.videoId, targetT); } catch (e) {}
       trackEl.textContent = s.videoId;
-      // Fall through — if scheduled, we still need to honor the wait.
+      return;
     }
 
-    var doApply = function () {
-      var current = player.getCurrentTime ? player.getCurrentTime() : 0;
-      var diff = current - targetT;
-      // Big drift = hard seek. Small drift = nothing (don't fight the
-      // host's clock by rate-bending; let next event correct).
-      if (Math.abs(diff) > 0.6) {
-        try { player.seekTo(targetT, true); } catch (e) {}
-      }
-      var st = player.getPlayerState ? player.getPlayerState() : -1;
-      if (s.playing && st !== 1 && st !== 3) player.playVideo();
-      else if (!s.playing && st === 1) player.pauseVideo();
-    };
-
-    if (scheduleMs !== null) {
-      var localTarget = scheduleMs - clockOffsetMs;
-      var wait = localTarget - Date.now();
-      if (wait > 0 && wait < 5000) {
-        // Pre-pause + pre-seek so the only thing left at startAtMs is the
-        // single play() call — fires at the same wall-clock instant on
-        // every peer.
-        try { player.pauseVideo(); } catch (e) {}
-        try { player.seekTo(targetT, true); } catch (e) {}
-        setTimeout(doApply, wait);
-        return;
-      }
+    if (!s.playing) {
+      try { player.pauseVideo(); } catch (e) {}
+      try { player.setPlaybackRate(1.0); } catch (e) {}
+      return;
     }
-    doApply();
+
+    var current = player.getCurrentTime ? player.getCurrentTime() : 0;
+    var diff = targetT - current;
+
+    if (Math.abs(diff) > 2.0) {
+      try { player.seekTo(targetT, true); } catch (e) {}
+      try { player.setPlaybackRate(1.0); } catch (e) {}
+    } else if (Math.abs(diff) > 0.1) {
+      var nudge = 0.25 * diff;
+      if (nudge > 0.005) nudge = 0.005;
+      if (nudge < -0.005) nudge = -0.005;
+      try { player.setPlaybackRate(1.0 + nudge); } catch (e) {}
+    } else {
+      try { player.setPlaybackRate(1.0); } catch (e) {}
+    }
+
+    var st = player.getPlayerState ? player.getPlayerState() : -1;
+    if (st !== 1 && st !== 3) { try { player.playVideo(); } catch (e) {} }
   }
 
   window.onYouTubeIframeAPIReady = function () {

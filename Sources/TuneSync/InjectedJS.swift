@@ -138,83 +138,63 @@ enum InjectedJS {
     });
   }
 
-  // Pending scheduled-play timer handle, so we can cancel it if a newer
-  // state supersedes (e.g., user pauses before the scheduled play fires).
-  var pendingPlayTimeout = null;
-  // While a scheduled play is armed, YT Music's own player layer may try
-  // to re-issue v.play() (its UI thinks the song is playing). We install
-  // a defensive "play" listener that immediately re-pauses during the
-  // wait window. Cleared the instant the schedule fires.
-  var scheduleHoldHandler = null;
-  function installScheduleHold() {
-    var v = getVideo();
-    if (!v || scheduleHoldHandler) return;
-    scheduleHoldHandler = function () {
-      // Still inside the schedule window — squash the play immediately.
-      try { v.pause(); } catch (e) {}
-    };
-    v.addEventListener("play", scheduleHoldHandler, true);
-  }
-  function releaseScheduleHold() {
-    if (!scheduleHoldHandler) return;
-    var v = getVideo();
-    if (v) {
-      try { v.removeEventListener("play", scheduleHoldHandler, true); } catch (e) {}
-    }
-    scheduleHoldHandler = null;
-  }
-  function cancelPending() {
-    if (pendingPlayTimeout !== null) {
-      clearTimeout(pendingPlayTimeout);
-      pendingPlayTimeout = null;
-    }
-    releaseScheduleHold();
-  }
-
-  window.tunesyncApplyState = function (videoId, t, playing, startAtMs) {
+  // PLL-follower model. Receiver computes the host's CURRENT position in
+  // our local clock frame and either hard-seeks (drift > 2s), rate-bends
+  // (100ms..2s, ±0.5%), or locks (rate=1.0, within ±100ms). No pre-pause,
+  // no schedule for plain play/pause/seek. Track changes still use
+  // startAtMs to give both peers time to loadVideoById.
+  window.tunesyncApplyState = function (videoId, t, playing, startAtMs, clientMs, offsetMs) {
     var v = getVideo();
     if (!v) return false;
     var current = getVideoId();
+    offsetMs = (typeof offsetMs === "number") ? offsetMs : 0;
 
+    // Track change: navigate. The injected script reattaches on the new
+    // page and the next state msg drives PLL from there. Honor host's
+    // forward progress since the message was encoded.
     if (videoId && videoId !== current) {
       lastAppliedAt = Date.now();
       lastAppliedVideoId = videoId;
-      var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(t || 0);
+      var hostNow0 = Date.now() - offsetMs;
+      var targetT0 = (t || 0);
+      if (typeof clientMs === "number" && playing) {
+        targetT0 += Math.max(0, (hostNow0 - clientMs)) / 1000;
+      }
+      var dest = "https://music.youtube.com/watch?v=" + encodeURIComponent(videoId) + "&t=" + Math.floor(targetT0);
       window.location.href = dest;
       return true;
     }
 
-    if (typeof t === "number" && Math.abs((v.currentTime || 0) - t) > 1.0) {
-      try { v.currentTime = t; } catch (e) {}
+    // Pause is immediate, no math.
+    if (!playing) {
+      if (!v.paused) { try { v.pause(); } catch (e) {} }
+      try { v.playbackRate = 1.0; } catch (e) {}
+      lastAppliedAt = Date.now();
+      lastAppliedVideoId = videoId || current;
+      return true;
     }
 
-    cancelPending();
+    // PLL: compute target_t in our local frame, decide hard-seek vs
+    // rate-bend vs lock.
+    var hostNow = Date.now() - offsetMs;
+    var elapsedMs = (typeof clientMs === "number") ? Math.max(0, hostNow - clientMs) : 0;
+    var targetT = (t || 0) + (elapsedMs / 1000);
+    var diff = targetT - (v.currentTime || 0); // positive = we're behind
 
-    if (playing) {
-      var delay = (typeof startAtMs === "number") ? (startAtMs - Date.now()) : 0;
-      if (delay > 0) {
-        // Scheduled play: pre-pause now (so we don't "play through" the
-        // wait window), then arm the timer. All peers do this in
-        // lockstep; both fire v.play() at the same wall-clock instant.
-        try { if (!v.paused) v.pause(); } catch (e) {}
-        // Hold against YT Music's player layer re-issuing play() during
-        // the wait window — without this guard, the music kept playing
-        // even though the countdown overlay was up.
-        installScheduleHold();
-        pendingPlayTimeout = setTimeout(function () {
-          pendingPlayTimeout = null;
-          releaseScheduleHold();
-          var vv = getVideo();
-          if (vv && vv.paused) { vv.play().catch(function () {}); }
-        }, delay);
-      } else {
-        // Either no schedule, or schedule already in the past — play now.
-        if (v.paused) { v.play().catch(function () {}); }
-      }
+    if (Math.abs(diff) > 2.0) {
+      try { v.currentTime = targetT; } catch (e) {}
+      try { v.playbackRate = 1.0; } catch (e) {}
+    } else if (Math.abs(diff) > 0.1) {
+      // Kp = 0.25, clamp ±0.005 (±0.5%). Audibly inaudible.
+      var nudge = 0.25 * diff;
+      if (nudge > 0.005) nudge = 0.005;
+      if (nudge < -0.005) nudge = -0.005;
+      try { v.playbackRate = 1.0 + nudge; } catch (e) {}
     } else {
-      // Pause is always immediate.
-      if (!v.paused) v.pause();
+      try { v.playbackRate = 1.0; } catch (e) {}
     }
+
+    if (v.paused) { try { v.play().catch(function () {}); } catch (e) {} }
 
     lastAppliedAt = Date.now();
     lastAppliedVideoId = videoId || current;
@@ -243,7 +223,7 @@ enum InjectedJS {
   // Periodic catch-up for slow drifts (e.g., user lets a song play untouched).
   setInterval(reportState, 5000);
 
-  console.info("[tunesync] injected (v0.2.8)");
+  console.info("[tunesync] injected (v0.5.0-pll)");
 })();
 """#
 }

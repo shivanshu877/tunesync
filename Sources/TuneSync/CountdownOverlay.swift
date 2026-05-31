@@ -40,7 +40,7 @@ public struct CountdownOverlay: View {
                 .contentTransition(.numericText())
                 .animation(.spring(response: 0.3), value: bigDigit)
 
-            Text("Playing on every Mac in the room")
+            Text("Loading new track on every Mac…")
                 .font(.system(size: 14, weight: .medium))
                 .foregroundColor(.white.opacity(0.85))
 
