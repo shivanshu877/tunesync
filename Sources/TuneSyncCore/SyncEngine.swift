@@ -102,6 +102,11 @@ public final class SyncEngine: @unchecked Sendable {
     /// (paused → playing) apart from steady-state heartbeats.
     private var lastBroadcastPlaying: Bool = false
 
+    /// Maps a sender's id to the NTP-style estimate of (their clock − our clock) in ms.
+    /// Subtract from a remote `startAtMs` to convert it into our local clock frame.
+    /// Defaults to 0 so single-peer / no-ping cases behave as if clocks were synced.
+    private let clockOffsetMsFor: (String) -> Int
+
     public init(
         senderId: String,
         broadcast: @escaping (SyncMessage) -> Void,
@@ -111,7 +116,8 @@ public final class SyncEngine: @unchecked Sendable {
         heartbeatSeconds: Int = 1,
         applyOverheadMs: Int = 250,
         compCapMs: Int = 1500,
-        scheduleBufferMs: Int = 3000
+        scheduleBufferMs: Int = 800,
+        clockOffsetMsFor: @escaping (String) -> Int = { _ in 0 }
     ) {
         self.senderId = senderId
         self.broadcast = broadcast
@@ -122,6 +128,7 @@ public final class SyncEngine: @unchecked Sendable {
         self.applyOverheadMs = applyOverheadMs
         self.compCapMs = compCapMs
         self.scheduleBufferMs = scheduleBufferMs
+        self.clockOffsetMsFor = clockOffsetMsFor
     }
 
     public func applyStateOverride(_ apply: @escaping (PlayerState, Int64?) -> Void) {
