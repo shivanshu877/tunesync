@@ -11,7 +11,8 @@ final class SyncEngineTests: XCTestCase {
 
     private func makeEngine(
         senderId: String = "self",
-        recorder: Recorder
+        recorder: Recorder,
+        clockOffsetMsFor: @escaping (String) -> Int = { _ in 0 }
     ) -> SyncEngine {
         return SyncEngine(
             senderId: senderId,
@@ -19,7 +20,8 @@ final class SyncEngineTests: XCTestCase {
             applyState: { state, startAtMs in
                 recorder.applies.append(state)
                 recorder.appliesScheduledAt.append(startAtMs)
-            }
+            },
+            clockOffsetMsFor: clockOffsetMsFor
         )
     }
 
@@ -234,9 +236,9 @@ final class SyncEngineTests: XCTestCase {
         e.flushDebounceForTesting()
         guard case .state(let s) = r.broadcasts.last else { return XCTFail("expected state") }
         XCTAssertNotNil(s.startAtMs)
-        // 3-second schedule buffer (default), allow ±300ms scheduler jitter
-        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 2700)
-        XCTAssertLessThanOrEqual(s.startAtMs!, before + 3300)
+        // 800ms schedule buffer (default), allow ±300ms scheduler jitter
+        XCTAssertGreaterThanOrEqual(s.startAtMs!, before + 500)
+        XCTAssertLessThanOrEqual(s.startAtMs!, before + 1100)
     }
 
     func testLocalPauseBroadcastNoStartAtMs() {
