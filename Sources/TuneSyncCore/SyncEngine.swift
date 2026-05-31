@@ -116,7 +116,7 @@ public final class SyncEngine: @unchecked Sendable {
         heartbeatSeconds: Int = 1,
         applyOverheadMs: Int = 250,
         compCapMs: Int = 1500,
-        scheduleBufferMs: Int = 800,
+        scheduleBufferMs: Int = 2000,
         clockOffsetMsFor: @escaping (String) -> Int = { _ in 0 }
     ) {
         self.senderId = senderId
